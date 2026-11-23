@@ -1190,6 +1190,7 @@ void MQ2NavigationPlugin::StuckCheck()
 				&& FindSpeed(GetCharInfo()->pSpawn)
 				&& (GetDistanceFromPlayer(m_stuckX, m_stuckY) < FindSpeed(GetCharInfo()->pSpawn) / 600)
 				&& !GetCharInfo()->pSpawn->mPlayerPhysicsClient.Levitate
+				&& std::fabs(GetCharInfo()->pSpawn->SpeedZ) < 1.0f // not falling (e.g. dropping off a ledge)
 				&& !GetCharInfo()->pSpawn->UnderWater
 				&& !GetCharInfo()->Stunned
 				&& m_isActive)

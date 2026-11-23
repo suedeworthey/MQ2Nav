@@ -170,6 +170,25 @@ void UiController::DrawSettingsUI(bool fromSettingsPanel)
 		ImGui::Unindent();
 
 		ImGui::NewLine();
+		if (ImGui::Checkbox("Use ledge drop links", &settings.use_drop_links))
+			changed = true;
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("Take one-way \"Drop\" links placed in the mesh (jump off a ledge or out a window)\ninstead of walking the long way down.");
+		}
+		ImGui::Indent();
+		ImGui::SetNextItemWidth(120.f);
+		if (ImGui::DragFloat("Max safe drop height", &settings.max_safe_drop_height, 0.5f, 0.f, 1000.f, "%.0f"))
+			changed = true;
+		if (ImGui::IsItemHovered())
+		{
+			ImGui::SetTooltip("\"Drop\" links higher than this are only taken while levitating.\n\"Drop (levitate)\" links always require levitation.");
+		}
+		if (ImGui::Checkbox("Only drop while levitating", &settings.drop_links_require_levitate))
+			changed = true;
+		ImGui::Unindent();
+
+		ImGui::NewLine();
 		if (ImGui::Checkbox("Attempt to get unstuck", &settings.attempt_unstuck))
 			changed = true;
 		if (ImGui::IsItemHovered())

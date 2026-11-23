@@ -56,6 +56,18 @@ struct SettingsData
 	bool ignore_scripted_doors = true;
 
 	//------------------------------------------------------------------------
+	// ledge drops (one-way "Drop" / "Drop (levitate)" links placed in the mesh)
+
+	// use drop links at all
+	bool use_drop_links = true;
+
+	// highest fall (navmesh units) taken without levitation on "Drop" links
+	float max_safe_drop_height = 20.f;
+
+	// only take any drop link while levitating
+	bool drop_links_require_levitate = false;
+
+	//------------------------------------------------------------------------
 	// hazards (spawn avoidance)
 
 	// apply hazard rules to path calculations (per-command opt-out: noavoid)

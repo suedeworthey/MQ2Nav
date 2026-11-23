@@ -84,6 +84,28 @@ const std::vector<PolyAreaType> DefaultPolyAreas =
 		true,                    // valid
 		true,                    // selectable
 	},
+
+	// one-way link off a ledge: taken when the fall is survivable (or while levitating)
+	PolyAreaType{
+		7,                       // id
+		"Drop",                  // name
+		RGBA(255, 160, 0, 255),  // color
+		+(PolyFlags::Drop),
+		1.0f,                    // cost
+		true,                    // valid
+		true,                    // selectable
+	},
+
+	// one-way link off a ledge: only taken while levitating
+	PolyAreaType{
+		8,                       // id
+		"Drop (levitate)",       // name
+		RGBA(255, 96, 192, 255), // color
+		+(PolyFlags::LevDrop),
+		1.0f,                    // cost
+		true,                    // valid
+		true,                    // selectable
+	},
 };
 
 bool IsUserDefinedPolyArea(uint8_t areaId)

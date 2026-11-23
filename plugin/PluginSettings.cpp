@@ -94,6 +94,11 @@ void LoadSettings(bool showMessage/* = true*/)
 	// debug settings
 	settings.debug_render_pathing = LoadBoolSetting("DebugRenderPathing", defaults.debug_render_pathing);
 
+	// drop links
+	settings.use_drop_links = LoadBoolSetting("UseDropLinks", defaults.use_drop_links);
+	settings.max_safe_drop_height = LoadNumberSetting("MaxSafeDropHeight", defaults.max_safe_drop_height);
+	settings.drop_links_require_levitate = LoadBoolSetting("DropLinksRequireLevitate", defaults.drop_links_require_levitate);
+
 	// hazard settings
 	settings.hazards_enabled = LoadBoolSetting("HazardsEnabled", defaults.hazards_enabled);
 	settings.hazard_default_hard = LoadNumberSetting("HazardDefaultHard", defaults.hazard_default_hard);
@@ -162,6 +167,11 @@ void SaveSettings(bool showMessage/* = true*/)
 
 	// debug settings
 	SaveBoolSetting("DebugRenderPathing", g_settings.debug_render_pathing);
+
+	// drop links
+	SaveBoolSetting("UseDropLinks", g_settings.use_drop_links);
+	SaveNumberSetting("MaxSafeDropHeight", g_settings.max_safe_drop_height);
+	SaveBoolSetting("DropLinksRequireLevitate", g_settings.drop_links_require_levitate);
 
 	// hazard settings
 	SaveBoolSetting("HazardsEnabled", g_settings.hazards_enabled);

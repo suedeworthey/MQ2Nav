@@ -79,7 +79,14 @@ private:
 	dtPolyRef m_exemptEnd = 0;
 	std::unordered_set<dtPolyRef> m_extraBlocked; // added by the post-check for this path
 
+	// ledge drop links (Drop / LevDrop off-mesh connections)
+	bool m_dropLinksEnabled = true;
+	bool m_dropsRequireLevitate = false;
+	bool m_levitating = false;
+	float m_maxSafeDrop = 20.f;
+
 	bool IsPolyWithinRadius(const dtMeshTile* tile, const dtPoly* poly) const;
+	bool IsDropAllowed(const dtMeshTile* tile, const dtPoly* poly) const;
 
 public:
 	NavPathFilter() = default;
@@ -98,6 +105,14 @@ public:
 	void SetExemptPolys(dtPolyRef start, dtPolyRef end) { m_exemptStart = start; m_exemptEnd = end; }
 	void AddExtraBlocked(dtPolyRef ref) { m_extraBlocked.insert(ref); }
 	void ClearPathLocalState();
+
+	void SetDropRules(bool enabled, bool levitating, float maxSafeDrop, bool requireLevitate)
+	{
+		m_dropLinksEnabled = enabled;
+		m_levitating = levitating;
+		m_maxSafeDrop = maxSafeDrop;
+		m_dropsRequireLevitate = requireLevitate;
+	}
 };
 
 class NavigationPath
@@ -215,6 +230,7 @@ private:
 	bool m_hazardBlocked = false;
 	std::string m_hazardBlockReason;
 	uint64_t m_hazardVersion = 0;
+	bool m_computedLevitating = false;   // levitation state the current path was computed with
 
 	// the plugin owns the mesh
 	std::shared_ptr<dtNavMesh> m_navMesh;

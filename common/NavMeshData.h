@@ -21,6 +21,8 @@ enum struct PolyFlags : uint16_t
 	Jump          = 0x04, // ability to jump. (unused)
 	Disabled      = 0x08, // disabled polygon
 	Door          = 0x10, // ability to open doors
+	Drop          = 0x20, // drop off a ledge (taken if the fall is survivable or you levitate)
+	LevDrop       = 0x40, // drop off a ledge that is only taken while levitating
 
 	All           = 0xffff,
 };
@@ -35,6 +37,8 @@ enum struct PolyArea : uint8_t
 	Door       = 4,
 	Prefer     = 5,
 	Avoid      = 6,
+	Drop       = 7,        // one-way off-mesh link off a ledge; used if the fall is survivable or levitating
+	LevDrop    = 8,        // one-way off-mesh link off a ledge; used only while levitating
 
 	UserDefinedFirst = 10,
 	UserDefinedLast  = 60,
@@ -58,6 +62,12 @@ bool operator==(const PolyAreaType& a, const PolyAreaType& b);
 extern const std::vector<PolyAreaType> DefaultPolyAreas;
 
 bool IsUserDefinedPolyArea(uint8_t areaId);
+
+// true for the ledge-drop link areas (Drop, LevDrop)
+inline bool IsDropPolyArea(uint8_t areaId)
+{
+	return areaId == static_cast<uint8_t>(PolyArea::Drop) || areaId == static_cast<uint8_t>(PolyArea::LevDrop);
+}
 
 
 enum struct PartitionType : uint32_t

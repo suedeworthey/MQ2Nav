@@ -164,7 +164,22 @@ void OffMeshConnectionTool::handleMenu()
 			m_state->m_modified = true;
 		}
 
-		m_state->m_modified |= AreaTypeCombo(navMesh.get(), &m_state->m_editConnection.areaType);
+		uint8_t previousArea = m_state->m_editConnection.areaType;
+		if (AreaTypeCombo(navMesh.get(), &m_state->m_editConnection.areaType))
+		{
+			m_state->m_modified = true;
+
+			// ledge drops only work downward: default them to one-way
+			if (IsDropPolyArea(m_state->m_editConnection.areaType) && !IsDropPolyArea(previousArea))
+				m_state->m_editConnection.bidirectional = false;
+		}
+
+		if (IsDropPolyArea(m_state->m_editConnection.areaType))
+		{
+			ImGui::TextWrapped("Drop links are one-way: place the first point on the ledge and the second "
+				"where you land. MQ2Nav only takes them when the fall is within the safe drop height "
+				"(\"Drop\") or while levitating.");
+		}
 
 		if (ImGui::InputText("Name (optional)", &m_state->m_editConnection.name))
 		{
