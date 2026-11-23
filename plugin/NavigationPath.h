@@ -199,6 +199,11 @@ private:
 		bool incremental);
 	void UpdatePathProperties();
 
+	// Insert a waypoint after `segment` that bends the path around hazard `hazardIndex` without
+	// crossing any hard radius. Returns false if no walkable detour point was found.
+	bool TryHazardDetour(StraightPath& path, int segment, const HazardSnapshot& hazards,
+		int hazardIndex, uint64_t skipMask, const glm::vec3& extents);
+
 private:
 	std::shared_ptr<DestinationInfo> m_destinationInfo;
 

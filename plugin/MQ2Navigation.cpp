@@ -381,7 +381,7 @@ public:
 	virtual void ClearHazardRules() override
 	{
 		if (m_plugin->IsInitialized())
-			m_plugin->Get<HazardManager>()->ClearRules();
+			m_plugin->Get<HazardManager>()->ClearRules(true); // only rules added through the API
 	}
 
 	virtual int GetHazardRuleCount() override
@@ -1298,19 +1298,8 @@ void MQ2NavigationPlugin::AttemptMovement()
 			// update path
 			m_activePath->UpdatePath(false, true);
 
-			// a hazard moved into the way and there's no route around it: stand still
-			if (m_activePath->IsHazardBlocked())
-			{
-				SPDLOG_WARN("Navigation stopped: {}", m_activePath->GetHazardBlockReason());
-
-				UpdateCommandState(m_currentCommandState.get(), *m_activePath->GetDestinationInfo());
-				s_navAPIImpl->DispatchObserverEvent(nav::NavObserverEvent::NavFailed, m_currentCommandState.get());
-
-				TrueMoveOff(APPLY_TO_ALL);
-				m_isActive = false;
-				ResetPath();
+			if (StopIfHazardBlocked())
 				return;
-			}
 
 			m_isActive = m_activePath->GetPathSize() > 0;
 
@@ -1349,6 +1338,10 @@ void MQ2NavigationPlugin::AttemptMovement()
 			if (!m_activePath->IsAtEnd())
 			{
 				m_activePath->UpdatePath(false, true);
+
+				if (StopIfHazardBlocked())
+					return;
+
 				nextPosition = m_activePath->GetNextPosition();
 			}
 		}
@@ -1378,6 +1371,23 @@ void MQ2NavigationPlugin::AttemptMovement()
 			}
 		}
 	}
+}
+
+bool MQ2NavigationPlugin::StopIfHazardBlocked()
+{
+	if (!m_activePath || !m_activePath->IsHazardBlocked())
+		return false;
+
+	// a hazard moved into the way and there's no route around it: stand still and report failure
+	SPDLOG_WARN("Navigation stopped: {}", m_activePath->GetHazardBlockReason());
+
+	UpdateCommandState(m_currentCommandState.get(), *m_activePath->GetDestinationInfo());
+	s_navAPIImpl->DispatchObserverEvent(nav::NavObserverEvent::NavFailed, m_currentCommandState.get());
+
+	TrueMoveOff(APPLY_TO_ALL);
+	m_isActive = false;
+	ResetPath();
+	return true;
 }
 
 EQSwitch* ParseDoorTarget(char* buffer, const char* szLine, int& argIndex)
@@ -1465,6 +1475,7 @@ std::shared_ptr<DestinationInfo> MQ2NavigationPlugin::ParseDestination(std::stri
 		ParseOptions(line, idx, result->options, &args);
 
 		result->tag = std::move(args.tag);
+		result->avoidHazards = args.avoidHazards;
 	}
 
 	return result;
@@ -1788,9 +1799,9 @@ void MQ2NavigationPlugin::ParseOptions(std::string_view line, int idx, Navigatio
 			{
 				options.track = false;
 			}
-			else if (key == "noavoid")
+			else if (args && key == "noavoid")
 			{
-				options.avoidHazards = false;
+				args->avoidHazards = false;
 			}
 			else if (key == "facing")
 			{

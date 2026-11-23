@@ -130,12 +130,6 @@ bool ParseArc(std::string_view text, float& centerDeg, float& widthDeg)
 
 glm::vec2 To2D(const glm::vec3& meshPos) { return { meshPos.x, meshPos.z }; }
 
-glm::vec3 SpawnMeshPos(PlayerClient* pSpawn)
-{
-	float height = nav::GetSettings().use_spawn_floor_height ? pSpawn->FloorHeight : pSpawn->Z;
-	return { pSpawn->X, height, pSpawn->Y };
-}
-
 glm::vec3 PlayerMeshPos()
 {
 	PlayerClient* me = pControlledPlayer ? pControlledPlayer : pLocalPlayer;
@@ -166,15 +160,20 @@ std::string ZoneSection(int zoneId)
 
 //============================================================================
 
-uint64_t HazardSnapshot::ContainingMask(const glm::vec3& meshPos, float heightExtent) const
+uint64_t HazardSnapshot::DemotableMask(const glm::vec3& meshPos, float heightExtent) const
 {
 	uint64_t mask = 0;
 	glm::vec2 p = To2D(meshPos);
-	for (size_t i = 0; i < hazards.size(); ++i)
+	// bit 63 is shared by every hazard past 62, so it is never demoted
+	for (size_t i = 0; i < hazards.size() && i < 63; ++i)
 	{
 		const HazardEntry& h = hazards[i];
-		if (std::fabs(meshPos.y - h.height) <= heightExtent && hazard::PointInShape(h.shape, p, h.hardRadius))
+		if (h.inside == HazardInsideAction::Flee
+			&& std::fabs(meshPos.y - h.height) <= heightExtent
+			&& hazard::PointInShape(h.shape, p, h.hardRadius))
+		{
 			mask |= HazardBit(i);
+		}
 	}
 	return mask;
 }
@@ -235,7 +234,12 @@ void HazardManager::Initialize()
 {
 	if (NavMesh* mesh = g_mq2Nav->Get<NavMesh>())
 	{
-		m_meshChangedConn = mesh->OnNavMeshChanged.Connect([this]() { m_dirty = true; });
+		m_meshChangedConn = mesh->OnNavMeshChanged.Connect([this]()
+		{
+			for (Instance& inst : m_instances)
+				inst.polysValid = false;
+			m_dirty = true;
+		});
 	}
 
 	m_overlay = std::make_unique<RenderGroup>();
@@ -274,6 +278,7 @@ void HazardManager::ClearInstances()
 {
 	m_instances.clear();
 	m_dirty = true;
+	m_overlayDirty = true;
 	m_rescanRequested = true;
 
 	// publish an empty snapshot right away so nothing paths against stale positions
@@ -341,6 +346,7 @@ void HazardManager::OnRemoveSpawn(PlayerClient* pSpawn)
 	{
 		m_instances.erase(it, m_instances.end());
 		m_dirty = true;
+		m_overlayDirty = true;
 	}
 }
 
@@ -398,6 +404,7 @@ void HazardManager::MatchSpawn(PlayerClient* pSpawn)
 		UpdateInstanceState(inst, rule, pSpawn);
 		m_instances.push_back(std::move(inst));
 		m_dirty = true;
+		m_overlayDirty = true;
 
 		SPDLOG_DEBUG("Hazard: tracking {} ({}) for rule {}", pSpawn->DisplayedName, pSpawn->SpawnID, rule.id);
 	}
@@ -418,7 +425,12 @@ void HazardManager::UpdateInstanceState(Instance& inst, const HazardRule& rule, 
 {
 	auto& settings = nav::GetSettings();
 
-	inst.eqPos = GetSpawnPosition(pSpawn);
+	glm::vec3 pos = GetSpawnPosition(pSpawn);
+	if (glm::distance(pos, inst.eqPos) > 0.05f || std::fabs(pSpawn->Heading - inst.heading) > 0.5f)
+		m_overlayDirty = true;
+
+	inst.eqPos = pos;
+	inst.floorHeight = pSpawn->FloorHeight;
 	inst.heading = pSpawn->Heading;
 
 	auto resolve = [&](float value, float defaultValue) -> float
@@ -436,8 +448,12 @@ void HazardManager::UpdateInstanceState(Instance& inst, const HazardRule& rule, 
 	float softDefault = hard + std::max(0.f, settings.hazard_default_soft - settings.hazard_default_hard);
 	float soft = resolve(rule.soft, softDefault);
 
+	soft = std::max(hard, soft);
+	if (std::fabs(hard - inst.hardRadius) > 0.05f || std::fabs(soft - inst.softRadius) > 0.05f)
+		m_overlayDirty = true;
+
 	inst.hardRadius = hard;
-	inst.softRadius = std::max(hard, soft);
+	inst.softRadius = soft;
 }
 
 void HazardManager::RefreshInstances()
@@ -456,6 +472,7 @@ void HazardManager::RefreshInstances()
 		{
 			it = m_instances.erase(it);
 			m_dirty = true;
+			m_overlayDirty = true;
 			continue;
 		}
 
@@ -490,6 +507,7 @@ void HazardManager::RefreshInstances()
 			|| std::fabs(inst.hardRadius - inst.pathedHard) > 0.25f
 			|| std::fabs(inst.softRadius - inst.pathedSoft) > 0.25f)
 		{
+			inst.polysValid = false;
 			m_dirty = true;
 		}
 
@@ -512,13 +530,11 @@ void HazardManager::RebuildSnapshot()
 	}
 
 	auto start = clock::now();
-	auto& settings = nav::GetSettings();
 	auto snapshot = std::make_shared<HazardSnapshot>();
 	snapshot->version = m_version;
 
 	NavMesh* mesh = g_mq2Nav->Get<NavMesh>();
 	std::shared_ptr<dtNavMeshQuery> query = mesh && mesh->IsNavMeshLoaded() ? mesh->GetNavMeshQuery() : nullptr;
-	dtQueryFilter queryFilter; // all polygons
 
 	if (m_instances.size() > 63)
 	{
@@ -526,7 +542,7 @@ void HazardManager::RebuildSnapshot()
 			m_instances.size());
 	}
 
-	std::vector<glm::vec2> polyVerts;
+	int reclassified = 0;
 
 	for (Instance& inst : m_instances)
 	{
@@ -534,71 +550,56 @@ void HazardManager::RebuildSnapshot()
 		if (!rule)
 			continue;
 
+		// Hazards that haven't changed past the hysteresis thresholds keep their pathed values and
+		// cached polygon classification; only the ones that changed are re-queried.
+		if (!inst.polysValid)
+		{
+			inst.pathedPos = inst.eqPos;
+			inst.pathedHeading = inst.heading;
+			inst.pathedHard = inst.hardRadius;
+			inst.pathedSoft = inst.softRadius;
+		}
+
 		HazardEntry entry;
-		entry.shape.center = { inst.eqPos.x, inst.eqPos.y };
-		entry.shape.facing = hazard::HeadingToRadians(inst.heading);
+		entry.shape.center = { inst.pathedPos.x, inst.pathedPos.y };
+		entry.shape.facing = hazard::HeadingToRadians(inst.pathedHeading);
 		entry.shape.arcCenter = hazard::DegToRad(rule->arcCenterDeg);
 		entry.shape.arcHalfWidth = rule->IsFullCircle() ? hazard::kPi : hazard::DegToRad(rule->arcWidthDeg * 0.5f);
-		entry.hardRadius = inst.hardRadius;
-		entry.softRadius = inst.softRadius;
-		entry.height = inst.eqPos.z;
-		entry.eqPos = inst.eqPos;
+		entry.hardRadius = inst.pathedHard;
+		entry.softRadius = inst.pathedSoft;
+		entry.height = inst.floorHeight;
+		entry.eqPos = inst.pathedPos;
+		entry.inside = rule->inside;
 		entry.ruleId = inst.ruleId;
 		entry.spawnId = inst.spawnId;
 		entry.name = inst.name;
 
-		inst.pathedPos = inst.eqPos;
-		inst.pathedHeading = inst.heading;
-		inst.pathedHard = inst.hardRadius;
-		inst.pathedSoft = inst.softRadius;
+		if (!inst.polysValid && query)
+		{
+			ClassifyPolys(inst, entry.shape, query.get());
+			++reclassified;
+		}
 
 		size_t index = snapshot->hazards.size();
 		uint64_t bit = HazardBit(index);
-		snapshot->hazards.push_back(entry);
+		snapshot->hazards.push_back(std::move(entry));
 
-		if (!query)
-			continue;
-
-		const float center[3] = { entry.shape.center.x, entry.height, entry.shape.center.y };
-		const float extents[3] = { entry.softRadius, settings.hazard_height_extent, entry.softRadius };
-
-		PolyCollector collector;
-		query->queryPolygons(center, extents, &queryFilter, &collector);
-
-		for (const PolyCollector::Item& item : collector.items)
+		for (const Instance::CachedPoly& p : inst.polys)
 		{
-			if (item.poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION)
-				continue;
-
-			polyVerts.clear();
-			for (int v = 0; v < item.poly->vertCount; ++v)
+			switch (p.kind)
 			{
-				const float* pv = &item.tile->verts[item.poly->verts[v] * 3];
-				polyVerts.emplace_back(pv[0], pv[2]);
+			case Instance::PolyKind::HardFull:
+				snapshot->hardFull[p.ref] |= bit;
+				break;
+			case Instance::PolyKind::HardPartial:
+				snapshot->hardPartial[p.ref] |= bit;
+				[[fallthrough]];
+			case Instance::PolyKind::Soft:
+			{
+				float& mult = snapshot->costMult[p.ref];
+				mult = std::max({ mult, 1.f, p.mult });
+				break;
 			}
-
-			bool fullyInside = false;
-			if (hazard::PolygonOverlapsShape(polyVerts, entry.shape, entry.hardRadius, &fullyInside))
-			{
-				if (fullyInside)
-				{
-					snapshot->hardFull[item.ref] |= bit;
-				}
-				else
-				{
-					snapshot->hardPartial[item.ref] |= bit;
-					float& mult = snapshot->costMult[item.ref];
-					mult = std::max({ mult, 1.f, settings.hazard_boundary_cost_mult });
-				}
-			}
-			else if (entry.softRadius > entry.hardRadius
-				&& hazard::PolygonOverlapsShape(polyVerts, entry.shape, entry.softRadius, nullptr))
-			{
-				// graded: the closer to the hard radius, the more expensive
-				float dist = hazard::DistancePointPolygon(entry.shape.center, polyVerts);
-				float t = std::clamp((entry.softRadius - dist) / (entry.softRadius - entry.hardRadius), 0.f, 1.f);
-				float& mult = snapshot->costMult[item.ref];
-				mult = std::max({ mult, 1.f, 1.f + settings.hazard_soft_cost_mult * t });
 			}
 		}
 	}
@@ -607,8 +608,56 @@ void HazardManager::RebuildSnapshot()
 	m_lastBuildMs = std::chrono::duration<double, std::milli>(clock::now() - start).count();
 	m_snapshot = std::move(snapshot);
 
-	SPDLOG_DEBUG("Hazard: snapshot v{} with {} hazards, {} polys in {:.2f}ms",
-		m_version, m_snapshot->hazards.size(), m_lastPolyCount, m_lastBuildMs);
+	SPDLOG_DEBUG("Hazard: snapshot v{} with {} hazards ({} re-queried), {} polys in {:.2f}ms",
+		m_version, m_snapshot->hazards.size(), reclassified, m_lastPolyCount, m_lastBuildMs);
+}
+
+void HazardManager::ClassifyPolys(Instance& inst, const hazard::Shape& shape, dtNavMeshQuery* query)
+{
+	auto& settings = nav::GetSettings();
+	const float hardR = inst.pathedHard;
+	const float softR = inst.pathedSoft;
+
+	inst.polys.clear();
+	inst.polysValid = true;
+
+	// the floor under the spawn, so tall or levitating hazards still affect the ground beneath them
+	const float center[3] = { shape.center.x, inst.floorHeight, shape.center.y };
+	const float extents[3] = { softR, settings.hazard_height_extent, softR };
+
+	dtQueryFilter queryFilter; // all polygons
+	PolyCollector collector;
+	query->queryPolygons(center, extents, &queryFilter, &collector);
+
+	std::vector<glm::vec2> polyVerts;
+	for (const PolyCollector::Item& item : collector.items)
+	{
+		if (item.poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION)
+			continue;
+
+		polyVerts.clear();
+		for (int v = 0; v < item.poly->vertCount; ++v)
+		{
+			const float* pv = &item.tile->verts[item.poly->verts[v] * 3];
+			polyVerts.emplace_back(pv[0], pv[2]);
+		}
+
+		bool fullyInside = false;
+		if (hazard::PolygonOverlapsShape(polyVerts, shape, hardR, &fullyInside))
+		{
+			if (fullyInside)
+				inst.polys.push_back({ item.ref, Instance::PolyKind::HardFull, 1.f });
+			else
+				inst.polys.push_back({ item.ref, Instance::PolyKind::HardPartial, settings.hazard_boundary_cost_mult });
+		}
+		else if (softR > hardR && hazard::PolygonOverlapsShape(polyVerts, shape, softR, nullptr))
+		{
+			// graded: the closer to the hard radius, the more expensive
+			float dist = hazard::DistancePointPolygon(shape.center, polyVerts);
+			float t = std::clamp((softR - dist) / (softR - hardR), 0.f, 1.f);
+			inst.polys.push_back({ item.ref, Instance::PolyKind::Soft, 1.f + settings.hazard_soft_cost_mult * t });
+		}
+	}
 }
 
 //----------------------------------------------------------------------------
@@ -618,9 +667,10 @@ void HazardManager::UpdateVisuals()
 	auto& settings = nav::GetSettings();
 	const float heightOffset = 0.5f;
 
-	// in-world overlay (rebuilt with current positions, independent of snapshot hysteresis)
-	if (m_overlay)
+	// in-world overlay (current positions, independent of snapshot hysteresis; only when something moved)
+	if (m_overlay && m_overlayDirty)
 	{
+		m_overlayDirty = false;
 		m_overlay->Reset();
 
 		if (settings.hazard_show_overlay && !m_instances.empty())
@@ -640,7 +690,7 @@ void HazardManager::UpdateVisuals()
 				shape.facing = hazard::HeadingToRadians(inst.heading);
 				shape.arcCenter = hazard::DegToRad(rule->arcCenterDeg);
 				shape.arcHalfWidth = rule->IsFullCircle() ? hazard::kPi : hazard::DegToRad(rule->arcWidthDeg * 0.5f);
-				float y = inst.eqPos.z + heightOffset;
+				float y = inst.floorHeight + heightOffset;
 
 				auto drawOutline = [&](float r, unsigned int color)
 				{
@@ -844,6 +894,7 @@ bool HazardManager::RemoveRule(int id)
 	m_instances.erase(std::remove_if(m_instances.begin(), m_instances.end(),
 		[id](const Instance& inst) { return inst.ruleId == id; }), m_instances.end());
 	m_dirty = true;
+	m_overlayDirty = true;
 
 	if (persisted)
 		SaveRules();
@@ -863,11 +914,25 @@ int HazardManager::RemoveRulesByPattern(std::string_view pattern)
 	return static_cast<int>(ids.size());
 }
 
-void HazardManager::ClearRules()
+void HazardManager::ClearRules(bool transientOnly)
 {
+	if (transientOnly)
+	{
+		std::vector<int> ids;
+		for (const HazardRule& rule : m_rules)
+		{
+			if (rule.transient)
+				ids.push_back(rule.id);
+		}
+		for (int id : ids)
+			RemoveRule(id);
+		return;
+	}
+
 	m_rules.clear();
 	m_instances.clear();
 	m_dirty = true;
+	m_overlayDirty = true;
 	SaveRules();
 }
 
@@ -1064,8 +1129,9 @@ void HazardManager::PrintStatus() const
 static void HazardHelp()
 {
 	WriteChatf(PLUGIN_MSG "\aoHazard Commands:\ax");
-	WriteChatf(PLUGIN_MSG "\ag/nav avoid add \"<name>\" [type=npc|untargetable|aura|object|...] [hard=<n>|rampage] [soft=<n>|rampage] [arc=front|back|left|right|<center>,<width>] [sticky=on|off]\ax");
+	WriteChatf(PLUGIN_MSG "\ag/nav avoid add \"<name>\" [type=npc|untargetable|aura|object|...] [hard=<n>|rampage] [soft=<n>|rampage] [arc=front|back|left|right|<center>,<width>] [inside=flee|hold] [sticky=on|off]\ax");
 	WriteChatf(PLUGIN_MSG "    avoid every spawn whose name contains <name>. hard = never enter, soft = keep this far if possible.");
+	WriteChatf(PLUGIN_MSG "    inside=flee (default) lets paths leave the hazard when you're caught in it; inside=hold refuses to move.");
 	WriteChatf(PLUGIN_MSG "\ag/nav avoid remove <id|\"name\">\ax, \ag/nav avoid list\ax, \ag/nav avoid clear\ax, \ag/nav avoid enable|disable <id>\ax");
 	WriteChatf(PLUGIN_MSG "\ag/nav hazard status|rescan\ax, \ag/nav hazard pathing on|off\ax, \ag/nav hazard show on|off\ax, \ag/nav hazard map on|off\ax");
 	WriteChatf(PLUGIN_MSG "  Navigation option \aynoavoid\ax ignores hazards for one command.");
@@ -1174,6 +1240,7 @@ bool HazardManager::HandleCommand(const char* line)
 		if (!_stricmp(sub, "show") && ParseBool(arg, value))
 		{
 			settings.hazard_show_overlay = value;
+			m_overlayDirty = true;
 			nav::SaveSettings(false);
 			UpdateVisuals();
 			return true;
@@ -1210,7 +1277,11 @@ void HazardManager::DebugUI()
 	bool changed = false;
 
 	changed |= ImGui::Checkbox("Apply hazards to pathing", &settings.hazards_enabled);
-	changed |= ImGui::Checkbox("Show overlay", &settings.hazard_show_overlay);
+	if (ImGui::Checkbox("Show overlay", &settings.hazard_show_overlay))
+	{
+		m_overlayDirty = true;
+		changed = true;
+	}
 	ImGui::SameLine();
 	if (ImGui::Checkbox("Show on map", &settings.hazard_show_map))
 	{
@@ -1306,7 +1377,13 @@ void HazardManager::DebugUI()
 		changed |= ImGui::DragFloat("Move epsilon", &settings.hazard_move_epsilon, 0.1f, 0.f, 20.f, "%.1f");
 		changed |= ImGui::DragInt("Post-check iterations", &settings.hazard_postcheck_iterations, 0.2f, 0, 16);
 		if (changed)
+		{
+			// radii and cost multipliers are baked into the cached polygon classification
+			for (Instance& inst : m_instances)
+				inst.polysValid = false;
 			m_dirty = true;
+			m_overlayDirty = true;
+		}
 		ImGui::TreePop();
 	}
 

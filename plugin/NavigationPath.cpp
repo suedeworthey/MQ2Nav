@@ -31,6 +31,9 @@ const int MAX_STRAIGHT_PATH_LENGTH = 16384;
 const float NODE_POOL_GROWTH_FACTOR = 1.5f;
 const int NODE_POOL_MAX_SIZE = 1024 * 1024; // the zone is insanely large if this gets hit
 
+// extra waypoints the hazard post-check may insert to bend a path around hazards
+const int MAX_HAZARD_DETOURS = 4;
+
 NavigationLine::LineStyle gNavigationLineStyle;
 
 //----------------------------------------------------------------------------
@@ -224,7 +227,7 @@ void NavigationPath::UpdatePath(bool force, bool incremental)
 
 	// a change in hazards (added, moved, removed) also requires a new path
 	if (thisPos == m_lastPos && m_destination == m_destinationInfo->eqDestinationPos && !force
-		&& (!m_destinationInfo->options.avoidHazards || m_hazardVersion == GetHazardVersion()))
+		&& (!m_destinationInfo->avoidHazards || m_hazardVersion == GetHazardVersion()))
 	{
 		return;
 	}
@@ -349,12 +352,12 @@ std::unique_ptr<StraightPath> NavigationPath::RecomputePath(
 	// in a hazard; hazards the player is inside are "demoted" (passable but expensive) so the path can
 	// leave them, while every other hazard stays a hard constraint.
 	std::shared_ptr<const HazardSnapshot> hazards;
-	if (!m_destinationInfo || m_destinationInfo->options.avoidHazards)
+	if (!m_destinationInfo || m_destinationInfo->avoidHazards)
 		hazards = GetHazardSnapshot();
 	m_hazardVersion = GetHazardVersion();
 
 	const float heightExtent = settings.hazard_height_extent;
-	uint64_t demotedMask = hazards ? hazards->ContainingMask(startPos, heightExtent) : 0;
+	uint64_t demotedMask = hazards ? hazards->DemotableMask(startPos, heightExtent) : 0;
 
 	m_filter.ClearPathLocalState();
 	m_filter.SetHazards(nullptr);
@@ -391,13 +394,42 @@ std::unique_ptr<StraightPath> NavigationPath::RecomputePath(
 		return {};
 	};
 
-	// a destination inside a hazard (other than one we're already standing in) can't be reached
+	// A destination inside a hazard (other than one we're already standing in) can't be reached. If the
+	// command only needs to get within distance=N of it (e.g. /nav to the hazard spawn itself), aim for the
+	// nearest point just outside the hard radius instead, as long as that is still within N.
+	glm::vec3 goal = endPos;
 	if (hazards)
 	{
-		int inside = hazards->FindContaining(endPos, heightExtent, demotedMask);
+		int inside = hazards->FindContaining(goal, heightExtent, demotedMask);
 		if (inside >= 0)
 		{
-			return failHazard(fmt::format("Destination is inside hazard '{}'", hazards->hazards[inside].name));
+			const HazardEntry& h = hazards->hazards[inside];
+			float allowed = m_destinationInfo ? m_destinationInfo->options.distance : 0.f;
+			bool substituted = false;
+
+			if (allowed > 0.f)
+			{
+				glm::vec2 center = h.shape.center;
+				glm::vec2 from{ startPos.x, startPos.z };
+				glm::vec2 dir = from - center;
+				if (glm::dot(dir, dir) < 1e-4f)
+					dir = { 1.f, 0.f };
+				dir = glm::normalize(dir);
+
+				const float margin = std::max(1.f, h.hardRadius * 0.05f);
+				glm::vec2 candidate = center + dir * (h.hardRadius + margin);
+				glm::vec3 candidate3{ candidate.x, goal.y, candidate.y };
+
+				if (glm::distance(candidate, glm::vec2{ goal.x, goal.z }) <= allowed
+					&& hazards->FindContaining(candidate3, heightExtent, demotedMask) < 0)
+				{
+					goal = candidate3;
+					substituted = true;
+				}
+			}
+
+			if (!substituted)
+				return failHazard(fmt::format("Destination is inside hazard '{}'", h.name));
 		}
 	}
 
@@ -405,7 +437,7 @@ std::unique_ptr<StraightPath> NavigationPath::RecomputePath(
 	dtPolyRef endRef;
 
 	m_query->findNearestPoly(
-		glm::value_ptr(endPos),
+		glm::value_ptr(goal),
 		glm::value_ptr(extents),
 		&m_filter, &endRef, glm::value_ptr(epos));
 
@@ -413,7 +445,7 @@ std::unique_ptr<StraightPath> NavigationPath::RecomputePath(
 	{
 		if (!incremental)
 		{
-			SPDLOG_ERROR("Could not locate destination on navmesh: {:.2f}", endPos.zxy());
+			SPDLOG_ERROR("Could not locate destination on navmesh: {:.2f}", goal.zxy());
 		}
 
 		m_failed = true;
@@ -425,6 +457,20 @@ std::unique_ptr<StraightPath> NavigationPath::RecomputePath(
 	int polysSize = MAX_STRAIGHT_PATH_LENGTH;
 	std::unique_ptr<dtPolyRef[]> polys = std::make_unique<dtPolyRef[]>(polysSize);
 	const int maxHazardRetries = hazards ? settings.hazard_postcheck_iterations : 0;
+
+	// Only blame hazards for a failure if the destination is reachable without them; otherwise it's an
+	// ordinary pathing failure (which keeps the previous path on incremental updates).
+	auto reachableIgnoringHazards = [&]() -> bool
+	{
+		m_filter.SetHazards(nullptr);
+		int count = 0;
+		dtStatus st = m_query->findPath(startRef, endRef, glm::value_ptr(spos), glm::value_ptr(epos),
+			&m_filter, polys.get(), &count, polysSize);
+		m_filter.SetHazards(hazards, demotedMask, settings.hazard_inside_cost_mult);
+
+		return dtStatusSucceed(st) && !dtStatusDetail(st, DT_PARTIAL_RESULT)
+			&& count > 0 && polys[count - 1] == endRef;
+	};
 
 	for (int hazardAttempt = 0; ; ++hazardAttempt)
 	{
@@ -487,9 +533,9 @@ std::unique_ptr<StraightPath> NavigationPath::RecomputePath(
 
 		if (dtStatusFailed(status))
 		{
-			SPDLOG_DEBUG("findPath from {} to {} failed.", startPos, endPos);
+			SPDLOG_DEBUG("findPath from {} to {} failed.", startPos, goal);
 
-			if (hazards)
+			if (hazards && reachableIgnoringHazards())
 				return failHazard("No path to the destination that stays outside hazards");
 
 			m_failed = true;
@@ -517,8 +563,8 @@ std::unique_ptr<StraightPath> NavigationPath::RecomputePath(
 			// Partial path, did not find path to target
 			SPDLOG_DEBUG("findPath from {:.2f} to {:.2f} returned a partial result.", startPos, endPos);
 
-			// with hazards active, a partial result usually means they wall off the destination
-			if (hazards)
+			// hazards may be what walls off the destination
+			if (hazards && reachableIgnoringHazards())
 				return failHazard("No path to the destination that stays outside hazards");
 
 			if (!incremental)
@@ -554,54 +600,144 @@ std::unique_ptr<StraightPath> NavigationPath::RecomputePath(
 			return std::move(path);
 
 		// Post-check: the corridor only avoids polygons *fully* inside hazards, and string-pulling hugs
-		// corners, so a straightened segment can still cut through a hard radius. Find the first such
-		// segment, block the corridor polygons that overlap that hazard, and search again.
-		int crossed = -1;
-		for (int i = 0; i + 1 < path->length && crossed < 0; ++i)
+		// corners, so a straightened segment can still cut through a hard radius. For the first such
+		// segment, block the corridor polygons that overlap that hazard and search again. When nothing
+		// can be blocked (the crossing is inside the polygon we start or end in) or we're out of
+		// reroutes, try bending the segment around the hazard with an extra waypoint instead.
+		bool repath = false;
+		for (int detours = 0; ; ++detours)
 		{
-			const glm::vec3& a = path->verts[i];
-			const glm::vec3& b = path->verts[i + 1];
-
-			// can't reroute inside an off-mesh link, only check where it lands
-			if (path->flags[i] & DT_STRAIGHTPATH_OFFMESH_CONNECTION)
-				crossed = hazards->FindContaining(b, heightExtent, demotedMask);
-			else
-				crossed = hazards->FindCrossing(a, b, heightExtent, demotedMask);
-		}
-
-		if (crossed < 0)
-			return std::move(path);
-
-		const HazardEntry& hit = hazards->hazards[crossed];
-		bool blockedAny = false;
-		for (int i = 0; i < numPolys; ++i)
-		{
-			dtPolyRef ref = polys[i];
-			if (ref == startRef || ref == endRef)
-				continue;
-
-			auto it = hazards->hardPartial.find(ref);
-			if (it != hazards->hardPartial.end() && (it->second & HazardBit(crossed)))
+			int crossed = -1;
+			int crossedSeg = -1;
+			for (int i = 0; i + 1 < path->length && crossed < 0; ++i)
 			{
-				m_filter.AddExtraBlocked(ref);
-				blockedAny = true;
+				const glm::vec3& a = path->verts[i];
+				const glm::vec3& b = path->verts[i + 1];
+
+				// can't reroute inside an off-mesh link, only check where it lands
+				if (path->flags[i] & DT_STRAIGHTPATH_OFFMESH_CONNECTION)
+					crossed = hazards->FindContaining(b, heightExtent, demotedMask);
+				else
+					crossed = hazards->FindCrossing(a, b, heightExtent, demotedMask);
+				crossedSeg = i;
 			}
+
+			if (crossed < 0)
+				return std::move(path);
+
+			const HazardEntry& hit = hazards->hazards[crossed];
+			const bool linkSegment = (path->flags[crossedSeg] & DT_STRAIGHTPATH_OFFMESH_CONNECTION) != 0;
+
+			if (detours == 0 && hazardAttempt < maxHazardRetries)
+			{
+				bool blockedAny = false;
+				for (int i = 0; i < numPolys; ++i)
+				{
+					dtPolyRef ref = polys[i];
+					if (ref == startRef || ref == endRef)
+						continue;
+
+					auto it = hazards->hardPartial.find(ref);
+					if (it != hazards->hardPartial.end() && (it->second & HazardBit(crossed)))
+					{
+						m_filter.AddExtraBlocked(ref);
+						blockedAny = true;
+					}
+				}
+
+				if (blockedAny)
+				{
+					SPDLOG_DEBUG("Path crosses hazard '{}', rerouting (attempt {})", hit.name, hazardAttempt + 1);
+					repath = true;
+					break;
+				}
+			}
+
+			if (linkSegment || detours >= MAX_HAZARD_DETOURS
+				|| !TryHazardDetour(*path, crossedSeg, *hazards, crossed, demotedMask, extents))
+			{
+				return failHazard(fmt::format("No path around hazard '{}'", hit.name));
+			}
+
+			SPDLOG_DEBUG("Path crosses hazard '{}', added a detour waypoint", hit.name);
 		}
 
-		if (!blockedAny)
-		{
-			// the crossing is inside the polygon we start or end in; there's nothing left to block
-			return failHazard(fmt::format("Path would cross hazard '{}' inside the start/end navmesh polygon", hit.name));
-		}
-
-		if (hazardAttempt >= maxHazardRetries)
-		{
-			return failHazard(fmt::format("No path around hazard '{}' (gave up after {} reroutes)",
-				hit.name, hazardAttempt));
-		}
-
-		SPDLOG_DEBUG("Path crosses hazard '{}', rerouting (attempt {})", hit.name, hazardAttempt + 1);
+		if (!repath)
+			return std::move(path);
 	}
+}
+
+bool NavigationPath::TryHazardDetour(StraightPath& path, int segment, const HazardSnapshot& hazards,
+	int hazardIndex, uint64_t skipMask, const glm::vec3& extents)
+{
+	if (segment < 0 || segment + 1 >= path.length || path.length + 1 > path.GetAllocatedSize())
+		return false;
+
+	const float heightExtent = nav::GetSettings().hazard_height_extent;
+	const HazardEntry& h = hazards.hazards[hazardIndex];
+	const glm::vec3 a = path.verts[segment];
+	const glm::vec3 b = path.verts[segment + 1];
+	const dtPolyRef aRef = path.polys[segment];
+	const float ringRadius = h.hardRadius + std::max(1.5f, h.hardRadius * 0.1f);
+	const float sampleHeight = (a.y + b.y) * 0.5f;
+
+	struct Candidate { float cost; glm::vec3 pos; dtPolyRef ref; };
+	std::vector<Candidate> candidates;
+
+	// candidate waypoints on a ring just outside the hard radius
+	constexpr int samples = 24;
+	for (int i = 0; i < samples; ++i)
+	{
+		glm::vec2 p2 = h.shape.center + hazard::DirectionFromAngle(hazard::kTwoPi * i / samples) * ringRadius;
+		glm::vec3 probe{ p2.x, sampleHeight, p2.y };
+		glm::vec3 nearest;
+		dtPolyRef ref = 0;
+
+		m_query->findNearestPoly(glm::value_ptr(probe), glm::value_ptr(extents), &m_filter, &ref, glm::value_ptr(nearest));
+		if (!ref || glm::distance(glm::vec2{ nearest.x, nearest.z }, p2) > 1.0f)
+			continue; // off the mesh here
+
+		if (hazards.FindContaining(nearest, heightExtent, skipMask) >= 0
+			|| hazards.FindCrossing(a, nearest, heightExtent, skipMask) >= 0
+			|| hazards.FindCrossing(nearest, b, heightExtent, skipMask) >= 0)
+		{
+			continue;
+		}
+
+		candidates.push_back({ glm::distance(a, nearest) + glm::distance(nearest, b), nearest, ref });
+	}
+
+	std::sort(candidates.begin(), candidates.end(),
+		[](const Candidate& l, const Candidate& r) { return l.cost < r.cost; });
+
+	auto walkable = [&](dtPolyRef fromRef, const glm::vec3& from, const glm::vec3& to)
+	{
+		dtRaycastHit hit;
+		std::memset(&hit, 0, sizeof(hit));
+		dtStatus status = m_query->raycast(fromRef, glm::value_ptr(from), glm::value_ptr(to), &m_filter, 0, &hit);
+		return dtStatusSucceed(status) && hit.t == FLT_MAX;
+	};
+
+	for (const Candidate& c : candidates)
+	{
+		if (!walkable(aRef, a, c.pos) || !walkable(c.ref, c.pos, b))
+			continue;
+
+		// insert after `segment`
+		for (int i = path.length; i > segment + 1; --i)
+		{
+			path.verts[i] = path.verts[i - 1];
+			path.flags[i] = path.flags[i - 1];
+			path.polys[i] = path.polys[i - 1];
+		}
+		path.verts[segment + 1] = c.pos;
+		path.flags[segment + 1] = 0;
+		path.polys[segment + 1] = c.ref;
+		++path.length;
+		return true;
+	}
+
+	return false;
 }
 
 void NavigationPath::UpdatePathProperties()

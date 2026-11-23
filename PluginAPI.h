@@ -54,9 +54,6 @@ struct NavigationOptions
 
 	// set a new default log level while the path is running. info is the default.
 	spdlog::level::level_enum logLevel = spdlog::level::info;
-
-	// respect hazard rules (/nav avoid). The "noavoid" option turns this off for one command.
-	bool avoidHazards = true;
 };
 
 // Represents the state of a nav command. This state is only valid during a
@@ -149,8 +146,10 @@ public:
 	virtual void UnregisterNavObserver(int observerId) = 0;
 
 	//----------------------------------------------------------------------------
-	// Hazards (spawns to avoid). Appended after the original interface so older callers keep working;
-	// add new methods below this line only.
+	// Hazards (spawns to avoid). These virtuals are appended after the original ones so the vtable
+	// layout of the methods above is unchanged; add new methods below this line only. (Data structs such
+	// as NavigationOptions/NavCommandState are a separate matter: any change to them requires rebuilding
+	// plugins that read them.)
 
 	// Add an avoid rule. spec uses the same arguments as "/nav avoid add", for example
 	//   "\"a swirling void\" type=untargetable hard=15 soft=25"
@@ -161,7 +160,8 @@ public:
 	// Remove a rule by id. Returns false if no such rule exists.
 	virtual bool RemoveHazardRule(int ruleId) = 0;
 
-	// Remove every rule for the current zone.
+	// Remove every rule added through AddHazardRule with persist = false. Persisted rules (including the
+	// user's /nav avoid rules) are kept; remove those individually with RemoveHazardRule.
 	virtual void ClearHazardRules() = 0;
 
 	virtual int GetHazardRuleCount() = 0;

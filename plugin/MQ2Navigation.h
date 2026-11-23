@@ -85,6 +85,7 @@ enum class HeightType
 struct NavigationArguments
 {
 	std::string tag;
+	bool avoidHazards = true;      // "noavoid" option
 };
 
 struct DestinationInfo
@@ -103,6 +104,10 @@ struct DestinationInfo
 	std::string waypoint;
 	bool isTarget = false;
 	std::string tag;
+
+	// respect hazard rules (/nav avoid). Kept here rather than in NavigationOptions so the public
+	// NavCommandState layout doesn't change.
+	bool avoidHazards = true;
 
 	bool valid = false;
 };
@@ -255,6 +260,7 @@ private:
 	void PressMovementKey(FacingType facing);
 	void MovementFinished(const glm::vec3& dest, FacingType facing);
 	void AttemptMovement();
+	bool StopIfHazardBlocked();
 
 	void Stop(bool reachedDestination);
 	void SetPaused(bool paused);

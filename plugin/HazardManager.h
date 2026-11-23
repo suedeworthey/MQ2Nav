@@ -24,6 +24,7 @@
 #include <vector>
 
 class RenderGroup;
+class dtNavMeshQuery;
 namespace nav { class MapCircle; }
 namespace eqlib { class PlayerClient; }
 
@@ -61,8 +62,9 @@ struct HazardEntry
 	hazard::Shape shape;
 	float hardRadius = 0.f;
 	float softRadius = 0.f;
-	float height = 0.f;          // navmesh y (EQ Z) of the spawn
+	float height = 0.f;          // navmesh y of the floor under the spawn
 	glm::vec3 eqPos{ 0.f };
+	HazardInsideAction inside = HazardInsideAction::Flee;
 	int ruleId = 0;
 	uint32_t spawnId = 0;
 	std::string name;
@@ -83,8 +85,10 @@ struct HazardSnapshot
 	// polygon -> path cost multiplier from soft rings and hard boundaries (>= 1)
 	std::unordered_map<dtPolyRef, float> costMult;
 
-	// mask of hazards whose hard shape contains a navmesh position (2D + height extent)
-	uint64_t ContainingMask(const glm::vec3& meshPos, float heightExtent) const;
+	// Mask of hazards the position is inside that a path may leave ("demoted" to a cost): only
+	// inside=flee hazards with their own bit (index < 63). inside=hold hazards stay hard, so a player
+	// standing in one holds position.
+	uint64_t DemotableMask(const glm::vec3& meshPos, float heightExtent) const;
 
 	// index of the first hazard (outside skipMask) whose hard shape contains the position, or -1
 	int FindContaining(const glm::vec3& meshPos, float heightExtent, uint64_t skipMask = 0) const;
@@ -119,7 +123,7 @@ public:
 	int AddRule(HazardRule rule);                  // returns the new rule id
 	bool RemoveRule(int id);
 	int RemoveRulesByPattern(std::string_view pattern);
-	void ClearRules();
+	void ClearRules(bool transientOnly = false);  // transientOnly: only rules added through the API
 	bool SetRuleEnabled(int id, bool enabled);
 
 	const std::vector<HazardRule>& GetRules() const { return m_rules; }
@@ -159,6 +163,7 @@ private:
 		bool renamed = false;
 
 		glm::vec3 eqPos{ 0.f };
+		float floorHeight = 0.f;     // the floor under the spawn; tall/levitating spawns still block it
 		float heading = 0.f;
 		float hardRadius = 0.f;
 		float softRadius = 0.f;
@@ -168,6 +173,12 @@ private:
 		float pathedHeading = 0.f;
 		float pathedHard = 0.f;
 		float pathedSoft = 0.f;
+
+		// polygon classification for the pathed values, reused until this hazard changes
+		enum class PolyKind : uint8_t { HardFull, HardPartial, Soft };
+		struct CachedPoly { dtPolyRef ref; PolyKind kind; float mult; };
+		std::vector<CachedPoly> polys;
+		bool polysValid = false;
 	};
 
 	const HazardRule* FindRule(int id) const;
@@ -176,6 +187,7 @@ private:
 	void Rescan();
 	void RefreshInstances();
 	void UpdateInstanceState(Instance& inst, const HazardRule& rule, eqlib::PlayerClient* pSpawn);
+	void ClassifyPolys(Instance& inst, const hazard::Shape& shape, dtNavMeshQuery* query);
 	void RebuildSnapshot();
 	void UpdateVisuals();
 	void ClearInstances();
@@ -196,6 +208,7 @@ private:
 
 	std::vector<Instance> m_instances;
 	bool m_dirty = true;             // snapshot needs a rebuild
+	bool m_overlayDirty = true;      // in-world overlay needs a redraw
 	bool m_rescanRequested = true;
 
 	std::shared_ptr<const HazardSnapshot> m_snapshot;
