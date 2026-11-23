@@ -7,6 +7,7 @@
 
 #include "common/Logging.h"
 #include "common/NavMesh.h"
+#include "plugin/HazardManager.h"
 #include "plugin/KeybindHandler.h"
 #include "plugin/ModelLoader.h"
 #include "plugin/PluginSettings.h"
@@ -353,6 +354,67 @@ public:
 	}
 
 	//============================================================================
+	// hazards
+
+	virtual int AddHazardRule(std::string_view spec, bool persist) override
+	{
+		if (!m_plugin->IsInitialized())
+			return -1;
+
+		auto* hazards = m_plugin->Get<HazardManager>();
+		HazardRule rule;
+		std::string error;
+		if (!hazards->ParseRule(spec, rule, error))
+		{
+			SPDLOG_ERROR("AddHazardRule: {}", error);
+			return -1;
+		}
+		rule.transient = !persist;
+		return hazards->AddRule(rule);
+	}
+
+	virtual bool RemoveHazardRule(int ruleId) override
+	{
+		return m_plugin->IsInitialized() && m_plugin->Get<HazardManager>()->RemoveRule(ruleId);
+	}
+
+	virtual void ClearHazardRules() override
+	{
+		if (m_plugin->IsInitialized())
+			m_plugin->Get<HazardManager>()->ClearRules();
+	}
+
+	virtual int GetHazardRuleCount() override
+	{
+		return m_plugin->IsInitialized() ? static_cast<int>(m_plugin->Get<HazardManager>()->GetRules().size()) : 0;
+	}
+
+	virtual int GetHazardRuleSpec(int index, char* buffer, size_t bufferSize) override
+	{
+		if (!m_plugin->IsInitialized())
+			return -1;
+
+		auto* hazards = m_plugin->Get<HazardManager>();
+		const auto& rules = hazards->GetRules();
+		if (index < 0 || index >= static_cast<int>(rules.size()))
+			return -1;
+
+		if (buffer && bufferSize > 0)
+			strncpy_s(buffer, bufferSize, hazards->DescribeRule(rules[index]).c_str(), _TRUNCATE);
+		return rules[index].id;
+	}
+
+	virtual bool IsPlayerInsideHazard() override
+	{
+		return m_plugin->IsInitialized() && m_plugin->Get<HazardManager>()->IsPlayerInsideHazard();
+	}
+
+	virtual float GetHazardDistance(const glm::vec3& eqPos) override
+	{
+		return m_plugin->IsInitialized() ? m_plugin->Get<HazardManager>()->GetHazardDistance(eqPos) : FLT_MAX;
+	}
+
+	//============================================================================
 
 	void DispatchObserverEvent(nav::NavObserverEvent event, nav::NavCommandState* state)
 	{
@@ -530,10 +592,19 @@ void MQ2NavigationPlugin::Plugin_OnRemoveGroundItem(PGROUNDITEM pGroundItem)
 
 void MQ2NavigationPlugin::Plugin_OnAddSpawn(PSPAWNINFO pSpawn)
 {
+	if (!m_initialized)
+		return;
+
+	Get<HazardManager>()->OnAddSpawn(pSpawn);
 }
 
 void MQ2NavigationPlugin::Plugin_OnRemoveSpawn(PSPAWNINFO pSpawn)
 {
+	if (!m_initialized)
+		return;
+
+	Get<HazardManager>()->OnRemoveSpawn(pSpawn);
+
 	// if the spawn is the current destination target we should clear i.t
 	if (m_isActive)
 	{
@@ -575,6 +646,7 @@ void MQ2NavigationPlugin::Plugin_Initialize()
 	AddModule<NavMeshRenderer>();
 	AddModule<UiController>();
 	AddModule<SwitchHandler>();
+	AddModule<HazardManager>();
 
 	for (const auto& m : m_modules)
 	{
@@ -736,6 +808,9 @@ static void DoHelp()
 	WriteChatf(PLUGIN_MSG "  \aypaused\ax - start navigation in a paused state.");
 	WriteChatf(PLUGIN_MSG "  \aynotrack\ax - disable tracking of spawn movement. By default, when navigating to a spawn, the destination location will track the spawn's position. This disables that behavior.");
 	WriteChatf(PLUGIN_MSG "  \ayfacing=<forward|backward>\ax - face forward or backward while moving.");
+	WriteChatf(PLUGIN_MSG "  \aysearchradius=<num>\ax - only use navmesh within this radius of \aysearchorigin=\"y x [z]\"\ax (default: your position).");
+	WriteChatf(PLUGIN_MSG "  \aynoavoid\ax - ignore hazard rules for this command.");
+	WriteChatf(PLUGIN_MSG "\aoHazards:\ax \ag/nav avoid add \"<name>\" [hard=<n>] [soft=<n>] ...\ax - avoid spawns. \ag/nav avoid help\ax for details.");
 
 	// NYI:
 	//WriteChatf(PLUGIN_MSG "\ag/nav options set \ay[options]\ax - save options as defaults");
@@ -872,6 +947,13 @@ void MQ2NavigationPlugin::Command_Navigate(std::string_view line)
 	{
 		DoHelp();
 
+		return;
+	}
+
+	// parse /nav avoid ... and /nav hazard ...
+	if (!_stricmp(buffer, "avoid") || !_stricmp(buffer, "hazard") || !_stricmp(buffer, "hazards"))
+	{
+		Get<HazardManager>()->HandleCommand(mutableLine);
 		return;
 	}
 
@@ -1215,6 +1297,21 @@ void MQ2NavigationPlugin::AttemptMovement()
 
 			// update path
 			m_activePath->UpdatePath(false, true);
+
+			// a hazard moved into the way and there's no route around it: stand still
+			if (m_activePath->IsHazardBlocked())
+			{
+				SPDLOG_WARN("Navigation stopped: {}", m_activePath->GetHazardBlockReason());
+
+				UpdateCommandState(m_currentCommandState.get(), *m_activePath->GetDestinationInfo());
+				s_navAPIImpl->DispatchObserverEvent(nav::NavObserverEvent::NavFailed, m_currentCommandState.get());
+
+				TrueMoveOff(APPLY_TO_ALL);
+				m_isActive = false;
+				ResetPath();
+				return;
+			}
+
 			m_isActive = m_activePath->GetPathSize() > 0;
 
 			m_pathfindTimer = now;
@@ -1690,6 +1787,10 @@ void MQ2NavigationPlugin::ParseOptions(std::string_view line, int idx, Navigatio
 			else if (key == "notrack")
 			{
 				options.track = false;
+			}
+			else if (key == "noavoid")
+			{
+				options.avoidHazards = false;
 			}
 			else if (key == "facing")
 			{

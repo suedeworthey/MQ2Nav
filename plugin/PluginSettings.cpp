@@ -94,6 +94,24 @@ void LoadSettings(bool showMessage/* = true*/)
 	// debug settings
 	settings.debug_render_pathing = LoadBoolSetting("DebugRenderPathing", defaults.debug_render_pathing);
 
+	// hazard settings
+	settings.hazards_enabled = LoadBoolSetting("HazardsEnabled", defaults.hazards_enabled);
+	settings.hazard_default_hard = LoadNumberSetting("HazardDefaultHard", defaults.hazard_default_hard);
+	settings.hazard_default_soft = LoadNumberSetting("HazardDefaultSoft", defaults.hazard_default_soft);
+	settings.hazard_rampage_margin = LoadNumberSetting("HazardRampageMargin", defaults.hazard_rampage_margin);
+	settings.hazard_soft_cost_mult = std::max(1.f, LoadNumberSetting("HazardSoftCostMult", defaults.hazard_soft_cost_mult));
+	settings.hazard_boundary_cost_mult = std::max(1.f, LoadNumberSetting("HazardBoundaryCostMult", defaults.hazard_boundary_cost_mult));
+	settings.hazard_inside_cost_mult = std::max(1.f, LoadNumberSetting("HazardInsideCostMult", defaults.hazard_inside_cost_mult));
+	settings.hazard_height_extent = LoadNumberSetting("HazardHeightExtent", defaults.hazard_height_extent);
+	settings.hazard_refresh_ms = std::max(50, LoadNumberSetting("HazardRefreshMs", defaults.hazard_refresh_ms));
+	settings.hazard_rescan_ms = std::max(100, LoadNumberSetting("HazardRescanMs", defaults.hazard_rescan_ms));
+	settings.hazard_move_epsilon = LoadNumberSetting("HazardMoveEpsilon", defaults.hazard_move_epsilon);
+	settings.hazard_heading_epsilon_deg = LoadNumberSetting("HazardHeadingEpsilonDeg", defaults.hazard_heading_epsilon_deg);
+	settings.hazard_postcheck_iterations = std::clamp(LoadNumberSetting("HazardPostCheckIterations", defaults.hazard_postcheck_iterations), 0, 16);
+	settings.hazard_show_overlay = LoadBoolSetting("HazardShowOverlay", defaults.hazard_show_overlay);
+	settings.hazard_show_map = LoadBoolSetting("HazardShowMap", defaults.hazard_show_map);
+	settings.hazard_map_layer = LoadNumberSetting("HazardMapLayer", defaults.hazard_map_layer);
+
 	// navigation line settings
 	NavigationLine::LineStyle defaultLineStyle;
 	gNavigationLineStyle.borderColor = LoadNumberSetting<uint32_t>("VisualNavPathBorderColor", defaultLineStyle.borderColor);
@@ -144,6 +162,24 @@ void SaveSettings(bool showMessage/* = true*/)
 
 	// debug settings
 	SaveBoolSetting("DebugRenderPathing", g_settings.debug_render_pathing);
+
+	// hazard settings
+	SaveBoolSetting("HazardsEnabled", g_settings.hazards_enabled);
+	SaveNumberSetting("HazardDefaultHard", g_settings.hazard_default_hard);
+	SaveNumberSetting("HazardDefaultSoft", g_settings.hazard_default_soft);
+	SaveNumberSetting("HazardRampageMargin", g_settings.hazard_rampage_margin);
+	SaveNumberSetting("HazardSoftCostMult", g_settings.hazard_soft_cost_mult);
+	SaveNumberSetting("HazardBoundaryCostMult", g_settings.hazard_boundary_cost_mult);
+	SaveNumberSetting("HazardInsideCostMult", g_settings.hazard_inside_cost_mult);
+	SaveNumberSetting("HazardHeightExtent", g_settings.hazard_height_extent);
+	SaveNumberSetting("HazardRefreshMs", g_settings.hazard_refresh_ms);
+	SaveNumberSetting("HazardRescanMs", g_settings.hazard_rescan_ms);
+	SaveNumberSetting("HazardMoveEpsilon", g_settings.hazard_move_epsilon);
+	SaveNumberSetting("HazardHeadingEpsilonDeg", g_settings.hazard_heading_epsilon_deg);
+	SaveNumberSetting("HazardPostCheckIterations", g_settings.hazard_postcheck_iterations);
+	SaveBoolSetting("HazardShowOverlay", g_settings.hazard_show_overlay);
+	SaveBoolSetting("HazardShowMap", g_settings.hazard_show_map);
+	SaveNumberSetting("HazardMapLayer", g_settings.hazard_map_layer);
 }
 
 bool ParseIniCommand(const char* command)

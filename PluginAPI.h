@@ -54,6 +54,9 @@ struct NavigationOptions
 
 	// set a new default log level while the path is running. info is the default.
 	spdlog::level::level_enum logLevel = spdlog::level::info;
+
+	// respect hazard rules (/nav avoid). The "noavoid" option turns this off for one command.
+	bool avoidHazards = true;
 };
 
 // Represents the state of a nav command. This state is only valid during a
@@ -93,7 +96,7 @@ enum class NavObserverEvent
 	NavPauseChanged,             // when navigation is paused or unpaused by the user
 	NavCanceled,                 // when navigation is canceled, either by starting a new command or by /nav stop
 	NavDestinationReached,       // when navigation reaches its destination.
-	NavFailed,                   // navigation command was executed but failed to start
+	NavFailed,                   // navigation command failed to start, or was stopped because a hazard blocks the path
 };
 
 // Observer function - Registering an observer function will allow your plugin to
@@ -144,6 +147,34 @@ public:
 
 	// Unregisters an observer that was registered with RegisterNavObserver
 	virtual void UnregisterNavObserver(int observerId) = 0;
+
+	//----------------------------------------------------------------------------
+	// Hazards (spawns to avoid). Appended after the original interface so older callers keep working;
+	// add new methods below this line only.
+
+	// Add an avoid rule. spec uses the same arguments as "/nav avoid add", for example
+	//   "\"a swirling void\" type=untargetable hard=15 soft=25"
+	// persist = false keeps the rule only until the zone changes or the plugin unloads.
+	// Returns the rule id, or -1 if the spec is invalid.
+	virtual int AddHazardRule(std::string_view spec, bool persist) = 0;
+
+	// Remove a rule by id. Returns false if no such rule exists.
+	virtual bool RemoveHazardRule(int ruleId) = 0;
+
+	// Remove every rule for the current zone.
+	virtual void ClearHazardRules() = 0;
+
+	virtual int GetHazardRuleCount() = 0;
+
+	// Write a description of the rule at index (0..GetHazardRuleCount()-1). Returns its id, or -1.
+	virtual int GetHazardRuleSpec(int index, char* buffer, size_t bufferSize) = 0;
+
+	// True if the player stands inside the hard radius of any hazard.
+	virtual bool IsPlayerInsideHazard() = 0;
+
+	// 2D distance from an EQ position (x, y, z) to the nearest hard hazard radius.
+	// Returns < 0 if the position is inside one, FLT_MAX if there are no hazards nearby.
+	virtual float GetHazardDistance(const glm::vec3& eqPos) = 0;
 };
 
 } // namespace nav

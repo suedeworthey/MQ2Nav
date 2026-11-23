@@ -21,6 +21,9 @@
     <None Include="..\README.MD" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="HazardManager.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="KeybindHandler.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -77,6 +80,12 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="HazardGeometry.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="HazardManager.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="KeybindHandler.h">
       <Filter>Header Files</Filter>
     </ClInclude>

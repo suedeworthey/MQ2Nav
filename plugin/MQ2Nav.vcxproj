@@ -144,6 +144,7 @@
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="SwitchHandler.cpp" />
+    <ClCompile Include="HazardManager.cpp" />
     <ClCompile Include="KeybindHandler.cpp" />
     <ClCompile Include="MapAPI.cpp" />
     <ClCompile Include="ModelLoader.cpp" />
@@ -167,6 +168,8 @@
     <ClInclude Include="EmbedResources.h" />
     <ClInclude Include="imgui\imgui_impl_dx9.h" />
     <ClInclude Include="imgui\imgui_impl_win32.h" />
+    <ClInclude Include="HazardGeometry.h" />
+    <ClInclude Include="HazardManager.h" />
     <ClInclude Include="KeybindHandler.h" />
     <ClInclude Include="MapAPI.h" />
     <ClInclude Include="ModelLoader.h" />

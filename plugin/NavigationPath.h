@@ -19,6 +19,8 @@
 
 #include <imgui.h>
 #include <memory>
+#include <string>
+#include <unordered_set>
 
 #define DEBUG_NAVIGATION_LINES 1
 
@@ -57,23 +59,45 @@ private:
 	int alloc = 0;
 };
 
+struct HazardSnapshot;
+
 // Query filter that can restrict a path to navmesh polygons within a 2D radius of an origin
-// (e.g. keep a pull path inside the camp radius). Requires DT_VIRTUAL_QUERYFILTER so Detour
-// calls the passFilter override.
+// (e.g. keep a pull path inside the camp radius), and applies hazards: polygons fully inside a hard
+// hazard radius are rejected, polygons near hazards cost more. Requires DT_VIRTUAL_QUERYFILTER so
+// Detour calls the overrides.
 class NavPathFilter : public dtQueryFilter
 {
 private:
 	int m_searchRadius = 0;            // 0 = no radius restriction
 	glm::vec3 m_searchOrigin{ 0.f };   // navmesh coordinates
 
+	// hazards (null = none)
+	std::shared_ptr<const HazardSnapshot> m_hazards;
+	uint64_t m_demotedMask = 0;        // hazards the path starts inside: passable, but expensive
+	float m_insideCostMult = 1.f;
+	dtPolyRef m_exemptStart = 0;
+	dtPolyRef m_exemptEnd = 0;
+	std::unordered_set<dtPolyRef> m_extraBlocked; // added by the post-check for this path
+
 	bool IsPolyWithinRadius(const dtMeshTile* tile, const dtPoly* poly) const;
 
 public:
 	NavPathFilter() = default;
 	~NavPathFilter() override = default;
+
 	bool passFilter(const dtPolyRef ref, const dtMeshTile* tile, const dtPoly* poly) const override;
+	float getCost(const float* pa, const float* pb,
+		const dtPolyRef prevRef, const dtMeshTile* prevTile, const dtPoly* prevPoly,
+		const dtPolyRef curRef, const dtMeshTile* curTile, const dtPoly* curPoly,
+		const dtPolyRef nextRef, const dtMeshTile* nextTile, const dtPoly* nextPoly) const override;
+
 	void SetSearchRadius(int radius) { m_searchRadius = radius; }
 	void SetSearchOrigin(const glm::vec3& pos) { m_searchOrigin = pos; }
+
+	void SetHazards(std::shared_ptr<const HazardSnapshot> hazards, uint64_t demotedMask = 0, float insideCostMult = 1.f);
+	void SetExemptPolys(dtPolyRef start, dtPolyRef end) { m_exemptStart = start; m_exemptEnd = end; }
+	void AddExtraBlocked(dtPolyRef ref) { m_extraBlocked.insert(ref); }
+	void ClearPathLocalState();
 };
 
 class NavigationPath
@@ -157,6 +181,10 @@ public:
 
 	bool IsFailed() const { return m_failed; }
 
+	// the last path computation failed because of a hazard (destination inside one, or no route around)
+	bool IsHazardBlocked() const { return m_hazardBlocked; }
+	const std::string& GetHazardBlockReason() const { return m_hazardBlockReason; }
+
 	mq::Signal<> PathUpdated;
 	mq::Signal<> RenderPathUpdated;
 
@@ -179,6 +207,9 @@ private:
 	glm::vec3 m_lastPos;
 
 	bool m_failed = false;
+	bool m_hazardBlocked = false;
+	std::string m_hazardBlockReason;
+	uint64_t m_hazardVersion = 0;
 
 	// the plugin owns the mesh
 	std::shared_ptr<dtNavMesh> m_navMesh;

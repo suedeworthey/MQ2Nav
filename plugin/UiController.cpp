@@ -5,6 +5,7 @@
 #include "pch.h"
 #include "UiController.h"
 
+#include "plugin/HazardManager.h"
 #include "plugin/ModelLoader.h"
 #include "plugin/MQ2Navigation.h"
 #include "plugin/NavigationPath.h"
@@ -405,6 +406,11 @@ void UiController::PerformUpdateTab(TabPage page)
 		if (ImGui::CollapsingHeader("Door Handler Debug"))
 		{
 			g_mq2Nav->Get<SwitchHandler>()->DebugUI();
+		}
+
+		if (ImGui::CollapsingHeader("Hazards"))
+		{
+			g_mq2Nav->Get<HazardManager>()->DebugUI();
 		}
 
 		if (ImGui::CollapsingHeader("Pathing Debug"))

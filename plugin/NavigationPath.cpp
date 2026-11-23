@@ -10,6 +10,7 @@
 #include "common/NavMeshData.h"
 #include "common/Utilities.h"
 #include "plugin/DebugDrawDX.h"
+#include "plugin/HazardManager.h"
 #include "plugin/MQ2Navigation.h"
 #include "plugin/PluginSettings.h"
 #include "plugin/NavMeshLoader.h"
@@ -221,8 +222,12 @@ void NavigationPath::UpdatePath(bool force, bool incremental)
 	// current position in mesh coordinates
 	glm::vec3 thisPos{ me->X, me->FloorHeight, me->Y };
 
-	if (thisPos == m_lastPos && m_destination == m_destinationInfo->eqDestinationPos  && !force)
+	// a change in hazards (added, moved, removed) also requires a new path
+	if (thisPos == m_lastPos && m_destination == m_destinationInfo->eqDestinationPos && !force
+		&& (!m_destinationInfo->options.avoidHazards || m_hazardVersion == GetHazardVersion()))
+	{
 		return;
+	}
 
 	m_destination = m_destinationInfo->eqDestinationPos;
 	m_lastPos = thisPos;
@@ -239,9 +244,10 @@ void NavigationPath::UpdatePath(bool force, bool incremental)
 		m_currentPath = std::move(newPath);
 		changed = true;
 	}
-	else if (!incremental)
+	else if (!incremental || m_hazardBlocked)
 	{
-		// not an incremental update, and no new path, so make sure there is no current path.
+		// not an incremental update (or a hazard now blocks the way), and no new path, so make sure
+		// there is no current path. Keeping the old path would walk straight into the hazard.
 		m_currentPath->Reset(0);
 		changed = true;
 	}
@@ -327,6 +333,10 @@ std::unique_ptr<StraightPath> NavigationPath::RecomputePath(
 	dtPolyRef startRef;
 	glm::vec3 spos;
 
+	m_failed = false;
+	m_hazardBlocked = false;
+	m_hazardBlockReason.clear();
+
 	// TODO: Cache the last known valid starting position to detect when moving off the mesh
 	// Apply (or clear, when searchRadius is 0) the radius restriction for this destination
 	if (m_destinationInfo)
@@ -334,6 +344,20 @@ std::unique_ptr<StraightPath> NavigationPath::RecomputePath(
 		m_filter.SetSearchOrigin(m_destinationInfo->options.searchOrigin);
 		m_filter.SetSearchRadius(m_destinationInfo->options.searchRadius);
 	}
+
+	// Hazards. The start lookup ignores them so the player can always be located, even while standing
+	// in a hazard; hazards the player is inside are "demoted" (passable but expensive) so the path can
+	// leave them, while every other hazard stays a hard constraint.
+	std::shared_ptr<const HazardSnapshot> hazards;
+	if (!m_destinationInfo || m_destinationInfo->options.avoidHazards)
+		hazards = GetHazardSnapshot();
+	m_hazardVersion = GetHazardVersion();
+
+	const float heightExtent = settings.hazard_height_extent;
+	uint64_t demotedMask = hazards ? hazards->ContainingMask(startPos, heightExtent) : 0;
+
+	m_filter.ClearPathLocalState();
+	m_filter.SetHazards(nullptr);
 
 	m_query->findNearestPoly(
 		glm::value_ptr(startPos),
@@ -349,6 +373,32 @@ std::unique_ptr<StraightPath> NavigationPath::RecomputePath(
 
 		m_failed = true;
 		return {};
+	}
+
+	// from here on, hazards apply
+	m_filter.SetHazards(hazards, demotedMask, settings.hazard_inside_cost_mult);
+
+	auto failHazard = [&](std::string reason) -> std::unique_ptr<StraightPath>
+	{
+		if (!incremental)
+			SPDLOG_ERROR("{}", reason);
+		else
+			SPDLOG_DEBUG("{}", reason);
+
+		m_hazardBlockReason = std::move(reason);
+		m_hazardBlocked = true;
+		m_failed = true;
+		return {};
+	};
+
+	// a destination inside a hazard (other than one we're already standing in) can't be reached
+	if (hazards)
+	{
+		int inside = hazards->FindContaining(endPos, heightExtent, demotedMask);
+		if (inside >= 0)
+		{
+			return failHazard(fmt::format("Destination is inside hazard '{}'", hazards->hazards[inside].name));
+		}
 	}
 
 	glm::vec3 epos;
@@ -370,124 +420,188 @@ std::unique_ptr<StraightPath> NavigationPath::RecomputePath(
 		return {};
 	}
 
+	m_filter.SetExemptPolys(startRef, endRef);
+
 	int polysSize = MAX_STRAIGHT_PATH_LENGTH;
 	std::unique_ptr<dtPolyRef[]> polys = std::make_unique<dtPolyRef[]>(polysSize);
-	int numPolys = 0;
-	int iters = 0;
-	dtStatus status = 0;
+	const int maxHazardRetries = hazards ? settings.hazard_postcheck_iterations : 0;
 
-	while (iters < 100)
+	for (int hazardAttempt = 0; ; ++hazardAttempt)
 	{
-		status = m_query->findPath(
-			startRef, endRef,
-			glm::value_ptr(spos),
-			glm::value_ptr(epos), &m_filter, polys.get(), &numPolys, polysSize);
+		int numPolys = 0;
+		int iters = 0;
+		dtStatus status = 0;
 
-		bool retry = false;
-
-		if (dtStatusDetail(status, DT_OUT_OF_NODES))
+		while (iters < 100)
 		{
-			// need to expand the node pool size
-			uint32_t maxNodes = (uint32_t)m_query->getNodePool()->getMaxNodes();
-			uint32_t newMaxNodes = std::min<uint32_t>(maxNodes * NODE_POOL_GROWTH_FACTOR, std::min<uint32_t>(DT_NULL_IDX, 1 << DT_NODE_PARENT_BITS) - 1);
-			if (maxNodes != newMaxNodes && newMaxNodes < NODE_POOL_MAX_SIZE)
-			{
-				SPDLOG_DEBUG("Growing node pool: {}", newMaxNodes);
+			status = m_query->findPath(
+				startRef, endRef,
+				glm::value_ptr(spos),
+				glm::value_ptr(epos), &m_filter, polys.get(), &numPolys, polysSize);
 
-				m_query->init(m_query->getAttachedNavMesh(), newMaxNodes);
-				retry = true;
+			bool retry = false;
+
+			if (dtStatusDetail(status, DT_OUT_OF_NODES))
+			{
+				// need to expand the node pool size
+				uint32_t maxNodes = (uint32_t)m_query->getNodePool()->getMaxNodes();
+				uint32_t newMaxNodes = std::min<uint32_t>(maxNodes * NODE_POOL_GROWTH_FACTOR, std::min<uint32_t>(DT_NULL_IDX, 1 << DT_NODE_PARENT_BITS) - 1);
+				if (maxNodes != newMaxNodes && newMaxNodes < NODE_POOL_MAX_SIZE)
+				{
+					SPDLOG_DEBUG("Growing node pool: {}", newMaxNodes);
+
+					m_query->init(m_query->getAttachedNavMesh(), newMaxNodes);
+					retry = true;
+				}
+				else
+				{
+					SPDLOG_WARN("Couldn't increase size of node pool. existing: {}, attempted: {}", maxNodes, newMaxNodes);
+				}
 			}
+
+			if (dtStatusDetail(status, DT_BUFFER_TOO_SMALL))
+			{
+				// need to expand polys buffer
+				int newPolysSize = polysSize *= NODE_POOL_GROWTH_FACTOR;
+				if (newPolysSize < NODE_POOL_MAX_SIZE)
+				{
+					SPDLOG_DEBUG("Growing polys buffer: {}", newPolysSize);
+
+					polysSize = newPolysSize;
+					polys = std::make_unique<dtPolyRef[]>(polysSize);
+					retry = true;
+				}
+				else
+				{
+					SPDLOG_WARN("Couldn't increase size of polys buffer. size: {}", newPolysSize);
+				}
+			}
+
+			if (!retry)
+			{
+				break;
+			}
+
+			iters++;
+		}
+
+		if (dtStatusFailed(status))
+		{
+			SPDLOG_DEBUG("findPath from {} to {} failed.", startPos, endPos);
+
+			if (hazards)
+				return failHazard("No path to the destination that stays outside hazards");
+
+			m_failed = true;
+			return {};
+		}
+
+		if (dtStatusDetail(status, DT_OUT_OF_NODES)
+			|| dtStatusDetail(status, DT_BUFFER_TOO_SMALL))
+		{
+			SPDLOG_DEBUG("findPath from {} to {} failed: incomplete result ({:#x})",
+				startPos, endPos, (status & DT_STATUS_DETAIL_MASK));
+
+			if (!incremental)
+			{
+				SPDLOG_ERROR("Could not reach destination (too far away): {:.2f}", endPos.zxy());
+			}
+
+			m_failed = true;
+			return {};
+		}
+
+		if ((numPolys > 0 && (polys[numPolys - 1] != endRef))
+			|| dtStatusDetail(status, DT_PARTIAL_RESULT))
+		{
+			// Partial path, did not find path to target
+			SPDLOG_DEBUG("findPath from {:.2f} to {:.2f} returned a partial result.", startPos, endPos);
+
+			// with hazards active, a partial result usually means they wall off the destination
+			if (hazards)
+				return failHazard("No path to the destination that stays outside hazards");
+
+			if (!incremental)
+			{
+				SPDLOG_ERROR("Could not find path to destination: {:.2f}", endPos.zxy());
+			}
+
+			m_failed = true;
+			return {};
+		}
+
+		auto path = std::make_unique<StraightPath>(MAX_STRAIGHT_PATH_LENGTH);
+
+		if (numPolys > 0)
+		{
+			m_query->findStraightPath(
+				glm::value_ptr(spos),
+				glm::value_ptr(epos), polys.get(), numPolys,
+				glm::value_ptr(path->verts[0]),
+				path->flags.get(),
+				path->polys.get(),
+				&path->length,
+				MAX_STRAIGHT_PATH_LENGTH,
+				DT_STRAIGHTPATH_AREA_CROSSINGS);
+
+			// The 0th index is the starting point. Begin by trying to reach the
+			// 2nd point...
+			if (path->length > 1)
+				path->cursor = 1;
+		}
+
+		if (!hazards)
+			return std::move(path);
+
+		// Post-check: the corridor only avoids polygons *fully* inside hazards, and string-pulling hugs
+		// corners, so a straightened segment can still cut through a hard radius. Find the first such
+		// segment, block the corridor polygons that overlap that hazard, and search again.
+		int crossed = -1;
+		for (int i = 0; i + 1 < path->length && crossed < 0; ++i)
+		{
+			const glm::vec3& a = path->verts[i];
+			const glm::vec3& b = path->verts[i + 1];
+
+			// can't reroute inside an off-mesh link, only check where it lands
+			if (path->flags[i] & DT_STRAIGHTPATH_OFFMESH_CONNECTION)
+				crossed = hazards->FindContaining(b, heightExtent, demotedMask);
 			else
+				crossed = hazards->FindCrossing(a, b, heightExtent, demotedMask);
+		}
+
+		if (crossed < 0)
+			return std::move(path);
+
+		const HazardEntry& hit = hazards->hazards[crossed];
+		bool blockedAny = false;
+		for (int i = 0; i < numPolys; ++i)
+		{
+			dtPolyRef ref = polys[i];
+			if (ref == startRef || ref == endRef)
+				continue;
+
+			auto it = hazards->hardPartial.find(ref);
+			if (it != hazards->hardPartial.end() && (it->second & HazardBit(crossed)))
 			{
-				SPDLOG_WARN("Couldn't increase size of node pool. existing: {}, attempted: {}", maxNodes, newMaxNodes);
+				m_filter.AddExtraBlocked(ref);
+				blockedAny = true;
 			}
 		}
 
-		if (dtStatusDetail(status, DT_BUFFER_TOO_SMALL))
+		if (!blockedAny)
 		{
-			// need to expand polys buffer
-			int newPolysSize = polysSize *= NODE_POOL_GROWTH_FACTOR;
-			if (newPolysSize < NODE_POOL_MAX_SIZE)
-			{
-				SPDLOG_DEBUG("Growing polys buffer: {}", newPolysSize);
-
-				polysSize = newPolysSize;
-				polys = std::make_unique<dtPolyRef[]>(polysSize);
-				retry = true;
-			}
-			else
-			{
-				SPDLOG_WARN("Couldn't increase size of polys buffer. size: {}", newPolysSize);
-			}
+			// the crossing is inside the polygon we start or end in; there's nothing left to block
+			return failHazard(fmt::format("Path would cross hazard '{}' inside the start/end navmesh polygon", hit.name));
 		}
 
-		if (!retry)
+		if (hazardAttempt >= maxHazardRetries)
 		{
-			break;
+			return failHazard(fmt::format("No path around hazard '{}' (gave up after {} reroutes)",
+				hit.name, hazardAttempt));
 		}
 
-		iters++;
+		SPDLOG_DEBUG("Path crosses hazard '{}', rerouting (attempt {})", hit.name, hazardAttempt + 1);
 	}
-
-	if (dtStatusFailed(status))
-	{
-		SPDLOG_DEBUG("findPath from {} to {} failed.", startPos, endPos);
-
-		m_failed = true;
-		return {};
-	}
-
-	if (dtStatusDetail(status, DT_OUT_OF_NODES)
-		|| dtStatusDetail(status, DT_BUFFER_TOO_SMALL))
-	{
-		SPDLOG_DEBUG("findPath from {} to {} failed: incomplete result ({:#x})",
-			startPos, endPos, (status & DT_STATUS_DETAIL_MASK));
-
-		if (!incremental)
-		{
-			SPDLOG_ERROR("Could not reach destination (too far away): {:.2f}", endPos.zxy());
-		}
-
-		m_failed = true;
-		return {};
-	}
-
-	if ((numPolys > 0 && (polys[numPolys - 1] != endRef))
-		|| dtStatusDetail(status, DT_PARTIAL_RESULT))
-	{
-		// Partial path, did not find path to target
-		SPDLOG_DEBUG("findPath from {:.2f} to {:.2f} returned a partial result.", startPos, endPos);
-
-		if (!incremental)
-		{
-			SPDLOG_ERROR("Could not find path to destination: {:.2f}", endPos.zxy());
-		}
-
-		m_failed = true;
-		return {};
-	}
-
-	auto path = std::make_unique<StraightPath>(MAX_STRAIGHT_PATH_LENGTH);
-
-	if (numPolys > 0)
-	{
-		m_query->findStraightPath(
-			glm::value_ptr(spos),
-			glm::value_ptr(epos), polys.get(), numPolys,
-			glm::value_ptr(path->verts[0]),
-			path->flags.get(),
-			path->polys.get(),
-			&path->length,
-			MAX_STRAIGHT_PATH_LENGTH,
-			DT_STRAIGHTPATH_AREA_CROSSINGS);
-
-		// The 0th index is the starting point. Begin by trying to reach the
-		// 2nd point...
-		if (path->length > 1)
-			path->cursor = 1;
-	}
-
-	return std::move(path);
 }
 
 void NavigationPath::UpdatePathProperties()
@@ -831,7 +945,61 @@ bool NavPathFilter::passFilter(const dtPolyRef ref, const dtMeshTile* tile, cons
 	if (m_searchRadius > 0 && !IsPolyWithinRadius(tile, poly))
 		return false;
 
+	if (m_hazards && ref != m_exemptStart && ref != m_exemptEnd)
+	{
+		if (!m_extraBlocked.empty() && m_extraBlocked.count(ref))
+			return false;
+
+		auto it = m_hazards->hardFull.find(ref);
+		if (it != m_hazards->hardFull.end() && (it->second & ~m_demotedMask) != 0)
+			return false;
+	}
+
 	return dtQueryFilter::passFilter(ref, tile, poly);
+}
+
+float NavPathFilter::getCost(const float* pa, const float* pb,
+	const dtPolyRef prevRef, const dtMeshTile* prevTile, const dtPoly* prevPoly,
+	const dtPolyRef curRef, const dtMeshTile* curTile, const dtPoly* curPoly,
+	const dtPolyRef nextRef, const dtMeshTile* nextTile, const dtPoly* nextPoly) const
+{
+	float cost = dtQueryFilter::getCost(pa, pb, prevRef, prevTile, prevPoly,
+		curRef, curTile, curPoly, nextRef, nextTile, nextPoly);
+
+	if (m_hazards)
+	{
+		// all multipliers are >= 1, which keeps the A* heuristic admissible
+		float mult = 1.f;
+
+		auto costIt = m_hazards->costMult.find(curRef);
+		if (costIt != m_hazards->costMult.end())
+			mult = costIt->second;
+
+		if (m_demotedMask)
+		{
+			auto fullIt = m_hazards->hardFull.find(curRef);
+			if (fullIt != m_hazards->hardFull.end() && (fullIt->second & m_demotedMask) != 0)
+				mult = std::max(mult, m_insideCostMult);
+		}
+
+		cost *= mult;
+	}
+
+	return cost;
+}
+
+void NavPathFilter::SetHazards(std::shared_ptr<const HazardSnapshot> hazards, uint64_t demotedMask, float insideCostMult)
+{
+	m_hazards = std::move(hazards);
+	m_demotedMask = demotedMask;
+	m_insideCostMult = std::max(1.f, insideCostMult);
+}
+
+void NavPathFilter::ClearPathLocalState()
+{
+	m_exemptStart = 0;
+	m_exemptEnd = 0;
+	m_extraBlocked.clear();
 }
 
 bool NavPathFilter::IsPolyWithinRadius(const dtMeshTile* tile, const dtPoly* poly) const
