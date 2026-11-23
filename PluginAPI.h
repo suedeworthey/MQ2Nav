@@ -23,6 +23,19 @@ namespace nav {
 
 //----------------------------------------------------------------------------
 
+// NavAPI interface version. 1 = original methods, 2 = adds the hazard methods (AddHazardRule ..
+// IsHazardMoveActive). Calling a method the loaded MQ2Nav doesn't implement would crash, so check
+// NavSupportsAPIVersion(2) (or the GetNavAPIVersion export) before using newer methods.
+constexpr int NAV_API_VERSION = 2;
+
+// For other plugins: true if the loaded MQ2Nav implements at least this NavAPI version.
+inline bool NavSupportsAPIVersion(int version)
+{
+	using fGetNavAPIVersion = int(*)();
+	auto fn = reinterpret_cast<fGetNavAPIVersion>(GetPluginProc("MQ2Nav", "GetNavAPIVersion"));
+	return fn ? fn() >= version : version <= 1;
+}
+
 // defines a type of destination that is being navigated to.
 enum class DestinationType
 {
@@ -94,6 +107,13 @@ enum class NavObserverEvent
 	NavCanceled,                 // when navigation is canceled, either by starting a new command or by /nav stop
 	NavDestinationReached,       // when navigation reaches its destination.
 	NavFailed,                   // navigation command failed to start, or was stopped because a hazard blocks the path
+
+	// Hazard autonomy (/nav hazard on). Nav is moving the character out of a hazard on its own; the
+	// command state's tag is "hazard". Plugins that steer the character (stick, follow, pulling,
+	// casting with a cast bar) should hold off until HazardMoveFinished. Finished is sent in every
+	// case: reached, canceled, failed or replaced by another command.
+	HazardMoveStarted,
+	HazardMoveFinished,
 };
 
 // Observer function - Registering an observer function will allow your plugin to
@@ -175,6 +195,13 @@ public:
 	// 2D distance from an EQ position (x, y, z) to the nearest hard hazard radius.
 	// Returns < 0 if the position is inside one, FLT_MAX if there are no hazards nearby.
 	virtual float GetHazardDistance(const glm::vec3& eqPos) = 0;
+
+	// Hazard autonomy: when enabled (per zone), nav moves the character out of hazards on its own.
+	virtual void SetHazardAutonomy(bool enabled) = 0;
+	virtual bool IsHazardAutonomyEnabled() = 0;
+
+	// True from HazardMoveStarted until HazardMoveFinished. Poll this as a fallback for the events.
+	virtual bool IsHazardMoveActive() = 0;
 };
 
 } // namespace nav

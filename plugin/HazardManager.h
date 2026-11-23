@@ -25,6 +25,7 @@
 
 class RenderGroup;
 class dtNavMeshQuery;
+class HazardMover;
 namespace nav { class MapCircle; }
 namespace eqlib { class PlayerClient; }
 
@@ -144,6 +145,13 @@ public:
 	float GetHazardDistance(const glm::vec3& eqPos) const;
 
 	//------------------------------------------------------------------------
+	// autonomy (persisted per zone)
+
+	void SetAutonomy(bool enabled);
+	bool IsAutonomyEnabled() const;
+	bool IsHazardMoveActive() const;
+
+	//------------------------------------------------------------------------
 	// commands / ui
 
 	// handles "/nav avoid ..." and "/nav hazard ..."; returns false if the line isn't a hazard command
@@ -218,6 +226,9 @@ private:
 
 	clock::time_point m_lastRefresh;
 	clock::time_point m_lastRescan;
+
+	std::unique_ptr<HazardMover> m_mover;
+	bool m_autonomy = false;   // loaded per zone
 
 	std::unique_ptr<RenderGroup> m_overlay;
 	std::vector<std::unique_ptr<nav::MapCircle>> m_mapCircles;

@@ -7,6 +7,7 @@
 
 #include "common/NavMesh.h"
 #include "plugin/DebugDrawDX.h"
+#include "plugin/HazardMover.h"
 #include "plugin/MapAPI.h"
 #include "plugin/MQ2Navigation.h"
 #include "plugin/PluginSettings.h"
@@ -227,11 +228,17 @@ uint64_t GetHazardVersion()
 
 //============================================================================
 
-HazardManager::HazardManager() = default;
+HazardManager::HazardManager()
+	: m_mover(std::make_unique<HazardMover>(this))
+{
+}
+
 HazardManager::~HazardManager() = default;
 
 void HazardManager::Initialize()
 {
+	m_mover->Initialize();
+
 	if (NavMesh* mesh = g_mq2Nav->Get<NavMesh>())
 	{
 		m_meshChangedConn = mesh->OnNavMeshChanged.Connect([this]()
@@ -248,6 +255,8 @@ void HazardManager::Initialize()
 
 void HazardManager::Shutdown()
 {
+	m_mover->Shutdown();
+
 	if (m_overlay)
 	{
 		g_renderHandler->RemoveRenderable(m_overlay.get());
@@ -262,7 +271,26 @@ void HazardManager::Shutdown()
 
 void HazardManager::OnBeginZone()
 {
+	m_mover->OnBeginZone();
 	ClearInstances();
+}
+
+void HazardManager::SetAutonomy(bool enabled)
+{
+	m_autonomy = enabled;
+	m_mover->SetEnabled(enabled);
+	SaveRules();
+	SPDLOG_INFO("Hazard autonomy {} for {}", enabled ? "enabled" : "disabled", GetShortZone(m_zoneId));
+}
+
+bool HazardManager::IsAutonomyEnabled() const
+{
+	return m_autonomy;
+}
+
+bool HazardManager::IsHazardMoveActive() const
+{
+	return m_mover->IsMoveActive();
 }
 
 void HazardManager::SetZoneId(int zoneId)
@@ -290,6 +318,9 @@ void HazardManager::ClearInstances()
 
 void HazardManager::OnPulse()
 {
+	// the mover reads the snapshot published on the previous refresh
+	m_mover->OnPulse();
+
 	if (m_rules.empty() && m_instances.empty())
 	{
 		if (m_snapshot)
@@ -1020,6 +1051,8 @@ void HazardManager::LoadRules(int zoneId)
 	m_nextRuleId = 1;
 	m_rescanRequested = true;
 	m_dirty = true;
+	m_autonomy = false;
+	m_mover->SetEnabled(false);
 
 	if (zoneId == -1)
 		return;
@@ -1035,6 +1068,13 @@ void HazardManager::LoadRules(int zoneId)
 	{
 		::GetPrivateProfileStringA(section.c_str(), key, "", value, sizeof(value), INIFileName);
 
+		if (!_stricmp(key, "Autonomy"))
+		{
+			m_autonomy = GetIntFromString(value, 0) != 0;
+			m_mover->SetEnabled(m_autonomy);
+			continue;
+		}
+
 		HazardRule rule;
 		if (DeserializeRule(value, rule))
 		{
@@ -1048,7 +1088,10 @@ void HazardManager::LoadRules(int zoneId)
 	}
 
 	if (!m_rules.empty())
-		SPDLOG_INFO("Loaded {} hazard rule(s) for {}", m_rules.size(), GetShortZone(zoneId));
+	{
+		SPDLOG_INFO("Loaded {} hazard rule(s) for {}{}", m_rules.size(), GetShortZone(zoneId),
+			m_autonomy ? " (autonomy on)" : "");
+	}
 }
 
 void HazardManager::SaveRules()
@@ -1060,6 +1103,12 @@ void HazardManager::SaveRules()
 
 	// rewrite the whole section so removed rules disappear
 	std::string data;
+	if (m_autonomy)
+	{
+		data += "Autonomy=1";
+		data.push_back('\0');
+	}
+
 	int n = 1;
 	for (const HazardRule& rule : m_rules)
 	{
@@ -1122,6 +1171,8 @@ void HazardManager::PrintStatus() const
 		settings.hazards_enabled ? "g" : "r", settings.hazards_enabled ? "on" : "off",
 		static_cast<int>(m_rules.size()), static_cast<int>(m_instances.size()),
 		m_version, static_cast<int>(m_lastPolyCount), m_lastBuildMs);
+	WriteChatf(PLUGIN_MSG "  Autonomy \a%s%s\ax for %s, mover %s", m_autonomy ? "g" : "r", m_autonomy ? "on" : "off",
+		GetShortZone(m_zoneId), m_mover->GetStateName());
 	if (inside)
 		WriteChatf(PLUGIN_MSG "  You are \arINSIDE\ax %s", insideName.c_str());
 }
@@ -1133,6 +1184,7 @@ static void HazardHelp()
 	WriteChatf(PLUGIN_MSG "    avoid every spawn whose name contains <name>. hard = never enter, soft = keep this far if possible.");
 	WriteChatf(PLUGIN_MSG "    inside=flee (default) lets paths leave the hazard when you're caught in it; inside=hold refuses to move.");
 	WriteChatf(PLUGIN_MSG "\ag/nav avoid remove <id|\"name\">\ax, \ag/nav avoid list\ax, \ag/nav avoid clear\ax, \ag/nav avoid enable|disable <id>\ax");
+	WriteChatf(PLUGIN_MSG "\ag/nav hazard on|off\ax - autonomy for this zone: get out of hazards without a nav command (pauses stick/follow/macro/CWTN while moving, then resumes)");
 	WriteChatf(PLUGIN_MSG "\ag/nav hazard status|rescan\ax, \ag/nav hazard pathing on|off\ax, \ag/nav hazard show on|off\ax, \ag/nav hazard map on|off\ax");
 	WriteChatf(PLUGIN_MSG "  Navigation option \aynoavoid\ax ignores hazards for one command.");
 }
@@ -1229,6 +1281,13 @@ bool HazardManager::HandleCommand(const char* line)
 			return true;
 		}
 
+		// autonomy: /nav hazard on|off
+		if (ParseBool(sub, value))
+		{
+			SetAutonomy(value);
+			return true;
+		}
+
 		if (!_stricmp(sub, "pathing") && ParseBool(arg, value))
 		{
 			settings.hazards_enabled = value;
@@ -1296,6 +1355,10 @@ void HazardManager::DebugUI()
 	std::string insideName;
 	ImGui::LabelText("Player", "%s", IsPlayerInsideHazard(&insideName)
 		? fmt::format("INSIDE {}", insideName).c_str() : "clear");
+
+	ImGui::Separator();
+	m_mover->DebugUI();
+	ImGui::Separator();
 
 	if (pTarget && ImGui::Button("Avoid current target"))
 	{

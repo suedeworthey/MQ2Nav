@@ -107,6 +107,13 @@ PLUGIN_API void OnUpdateImGui()
 //============================================================================
 // Wrappers for other plugins to access MQ2Nav
 
+// Version of the NavAPI interface this build implements (see NAV_API_VERSION in PluginAPI.h).
+// Check it before calling NavAPI methods newer than the original set.
+NAV_API int GetNavAPIVersion()
+{
+	return nav::NAV_API_VERSION;
+}
+
 // Used to check if MQ2Nav is initialized.
 NAV_API bool IsNavInitialized()
 {

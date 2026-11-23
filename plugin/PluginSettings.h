@@ -5,6 +5,7 @@
 #pragma once
 
 #include <glm/vec3.hpp>
+#include <string>
 
 namespace nav {
 
@@ -104,6 +105,38 @@ struct SettingsData
 	bool hazard_show_overlay = true;
 	bool hazard_show_map = true;
 	int hazard_map_layer = 3;
+
+	//------------------------------------------------------------------------
+	// hazard autonomy (/nav hazard on): getting out of hazards without a command
+
+	// random reaction time before moving, like a player noticing the hazard
+	int hazard_reaction_min_ms = 250;
+	int hazard_reaction_max_ms = 1200;
+
+	// don't start another autonomous move sooner than this after the last one (a hard breach overrides)
+	int hazard_retarget_min_ms = 1500;
+
+	// also move when only inside the soft radius (preferred standoff)
+	bool hazard_evade_soft = false;
+
+	// candidate escape points sampled around the hazard, and how they're scored:
+	// path length, minus a bonus for distance from other hazards, plus a random term (varies the spot)
+	int hazard_candidate_count = 12;
+	float hazard_candidate_random_weight = 0.15f;
+	float hazard_other_hazard_weight = 0.5f;
+
+	// don't fight the player: after /nav stop of an autonomous move, or manual movement, wait this long
+	int hazard_stop_suppress_ms = 3000;
+	int hazard_manual_input_suppress_ms = 2000;
+
+	// while moving out of a hazard, pause other things that steer the character, and resume them after.
+	// Extra commands are ';'-separated. {class} is replaced by your class code (war, enc, ...).
+	bool hazard_pause_macro = true;               // /mqpause on|off (only if a macro is running)
+	bool hazard_pause_cwtn = true;                // CWTN class plugin (only if MQ2<class> is loaded)
+	std::string hazard_cwtn_pause_command = "/{class} pause on";
+	std::string hazard_cwtn_resume_command = "/{class} pause off";
+	std::string hazard_move_start_commands = "/squelch /stick off;/squelch /moveto off;/squelch /afollow off";
+	std::string hazard_move_end_commands;
 };
 SettingsData& GetSettings();
 

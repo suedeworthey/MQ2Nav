@@ -414,6 +414,22 @@ public:
 		return m_plugin->IsInitialized() ? m_plugin->Get<HazardManager>()->GetHazardDistance(eqPos) : FLT_MAX;
 	}
 
+	virtual void SetHazardAutonomy(bool enabled) override
+	{
+		if (m_plugin->IsInitialized())
+			m_plugin->Get<HazardManager>()->SetAutonomy(enabled);
+	}
+
+	virtual bool IsHazardAutonomyEnabled() override
+	{
+		return m_plugin->IsInitialized() && m_plugin->Get<HazardManager>()->IsAutonomyEnabled();
+	}
+
+	virtual bool IsHazardMoveActive() override
+	{
+		return m_plugin->IsInitialized() && m_plugin->Get<HazardManager>()->IsHazardMoveActive();
+	}
+
 	//============================================================================
 
 	void DispatchObserverEvent(nav::NavObserverEvent event, nav::NavCommandState* state)
@@ -523,6 +539,7 @@ void MQ2NavigationPlugin::Plugin_OnBeginZone()
 		return;
 
 	// stop active path if one exists
+	m_endReason = NavEndReason::Canceled;
 	ResetPath();
 
 	UpdateCurrentZone();
@@ -1387,6 +1404,7 @@ bool MQ2NavigationPlugin::StopIfHazardBlocked()
 
 	TrueMoveOff(APPLY_TO_ALL);
 	m_isActive = false;
+	m_endReason = NavEndReason::Failed;
 	ResetPath();
 	return true;
 }
@@ -1918,6 +1936,7 @@ void MQ2NavigationPlugin::Stop(bool reachedDestination)
 		m_isActive = false;
 	}
 
+	m_endReason = reachedDestination ? NavEndReason::Reached : NavEndReason::Canceled;
 	ResetPath();
 }
 
@@ -1940,8 +1959,18 @@ void MQ2NavigationPlugin::SetPaused(bool paused)
 	s_navAPIImpl->DispatchObserverEvent(nav::NavObserverEvent::NavPauseChanged, m_currentCommandState.get());
 }
 
+void MQ2NavigationPlugin::DispatchNavEvent(nav::NavObserverEvent event)
+{
+	if (s_navAPIImpl)
+		s_navAPIImpl->DispatchObserverEvent(event, m_currentCommandState.get());
+}
+
 void MQ2NavigationPlugin::ResetPath()
 {
+	std::shared_ptr<DestinationInfo> endedInfo = m_activePath ? m_activePath->GetDestinationInfo() : nullptr;
+	NavEndReason endReason = m_endReason;
+	m_endReason = NavEndReason::Replaced;
+
 	// Double check if we need to send cancel event.
 	if (m_activePath && m_isActive)
 	{
@@ -1963,6 +1992,9 @@ void MQ2NavigationPlugin::ResetPath()
 	m_pEndingSwitch = nullptr;
 	m_endingGround.Reset();
 	m_activePath.reset();
+
+	if (endedInfo)
+		NavigationEnded(endedInfo, endReason);
 }
 
 #pragma endregion

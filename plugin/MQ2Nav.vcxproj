@@ -145,6 +145,7 @@
     </ClCompile>
     <ClCompile Include="SwitchHandler.cpp" />
     <ClCompile Include="HazardManager.cpp" />
+    <ClCompile Include="HazardMover.cpp" />
     <ClCompile Include="KeybindHandler.cpp" />
     <ClCompile Include="MapAPI.cpp" />
     <ClCompile Include="ModelLoader.cpp" />
@@ -170,6 +171,7 @@
     <ClInclude Include="imgui\imgui_impl_win32.h" />
     <ClInclude Include="HazardGeometry.h" />
     <ClInclude Include="HazardManager.h" />
+    <ClInclude Include="HazardMover.h" />
     <ClInclude Include="KeybindHandler.h" />
     <ClInclude Include="MapAPI.h" />
     <ClInclude Include="ModelLoader.h" />

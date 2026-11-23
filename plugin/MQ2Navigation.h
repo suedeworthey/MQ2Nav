@@ -112,6 +112,15 @@ struct DestinationInfo
 	bool valid = false;
 };
 
+// why a navigation command ended (MQ2NavigationPlugin::NavigationEnded)
+enum class NavEndReason
+{
+	Reached,    // destination reached
+	Canceled,   // /nav stop, zoning, unload
+	Failed,     // a hazard blocked the path
+	Replaced,   // a new navigation command started
+};
+
 glm::vec3 GetSpawnPosition(PSPAWNINFO pSpawn);
 glm::vec3 GetMyPosition();
 float GetMyVelocity();
@@ -237,6 +246,13 @@ public:
 
 	nav::NavCommandState* GetCurrentCommandState() { return m_isActive ? m_currentCommandState.get() : nullptr; }
 
+	// Fired after a navigation command has ended and the plugin state was reset. Starting a new
+	// command from a handler is not supported (defer it to the next pulse).
+	mq::Signal<const std::shared_ptr<DestinationInfo>&, NavEndReason> NavigationEnded;
+
+	// send an observer event with the current (or last) command state
+	void DispatchNavEvent(nav::NavObserverEvent event);
+
 private:
 	void UpdateCurrentZone();
 	void SetCurrentZone(int zoneId);
@@ -299,6 +315,9 @@ private:
 
 	// if paused, path will not be followed
 	bool m_isPaused = false;
+
+	// reason reported by NavigationEnded for the next ResetPath
+	NavEndReason m_endReason = NavEndReason::Replaced;
 
 	clock::time_point m_lastClick = clock::now();
 

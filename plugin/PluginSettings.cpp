@@ -45,6 +45,18 @@ static inline T LoadNumberSetting(const std::string& name, T defaultValue)
 	return mq::GetPrivateProfileValue<T>(SettingsSection, name, defaultValue, INIFileName);
 }
 
+static inline std::string LoadStringSetting(const std::string& name, const std::string& defaultValue)
+{
+	// "<none>" stores an intentionally empty value (an empty INI value reads back as the default)
+	std::string value = mq::GetPrivateProfileString(SettingsSection, name, defaultValue, INIFileName);
+	return value == "<none>" ? std::string() : value;
+}
+
+static inline void SaveStringSetting(const std::string& name, const std::string& value)
+{
+	mq::WritePrivateProfileString(SettingsSection, name, value.empty() ? "<none>" : value, INIFileName);
+}
+
 static inline void SaveBoolSetting(const std::string& name, bool value)
 {
 	mq::WritePrivateProfileBool(SettingsSection, name, value, INIFileName);
@@ -116,6 +128,23 @@ void LoadSettings(bool showMessage/* = true*/)
 	settings.hazard_show_overlay = LoadBoolSetting("HazardShowOverlay", defaults.hazard_show_overlay);
 	settings.hazard_show_map = LoadBoolSetting("HazardShowMap", defaults.hazard_show_map);
 	settings.hazard_map_layer = LoadNumberSetting("HazardMapLayer", defaults.hazard_map_layer);
+
+	// hazard autonomy
+	settings.hazard_reaction_min_ms = std::max(0, LoadNumberSetting("HazardReactionMinMs", defaults.hazard_reaction_min_ms));
+	settings.hazard_reaction_max_ms = std::max(settings.hazard_reaction_min_ms, LoadNumberSetting("HazardReactionMaxMs", defaults.hazard_reaction_max_ms));
+	settings.hazard_retarget_min_ms = std::max(0, LoadNumberSetting("HazardRetargetMinMs", defaults.hazard_retarget_min_ms));
+	settings.hazard_evade_soft = LoadBoolSetting("HazardEvadeSoft", defaults.hazard_evade_soft);
+	settings.hazard_candidate_count = std::clamp(LoadNumberSetting("HazardCandidateCount", defaults.hazard_candidate_count), 4, 64);
+	settings.hazard_candidate_random_weight = std::max(0.f, LoadNumberSetting("HazardCandidateRandomWeight", defaults.hazard_candidate_random_weight));
+	settings.hazard_other_hazard_weight = std::max(0.f, LoadNumberSetting("HazardOtherHazardWeight", defaults.hazard_other_hazard_weight));
+	settings.hazard_stop_suppress_ms = std::max(0, LoadNumberSetting("HazardStopSuppressMs", defaults.hazard_stop_suppress_ms));
+	settings.hazard_manual_input_suppress_ms = std::max(0, LoadNumberSetting("HazardManualInputSuppressMs", defaults.hazard_manual_input_suppress_ms));
+	settings.hazard_pause_macro = LoadBoolSetting("HazardPauseMacro", defaults.hazard_pause_macro);
+	settings.hazard_pause_cwtn = LoadBoolSetting("HazardPauseCWTN", defaults.hazard_pause_cwtn);
+	settings.hazard_cwtn_pause_command = LoadStringSetting("HazardCWTNPauseCommand", defaults.hazard_cwtn_pause_command);
+	settings.hazard_cwtn_resume_command = LoadStringSetting("HazardCWTNResumeCommand", defaults.hazard_cwtn_resume_command);
+	settings.hazard_move_start_commands = LoadStringSetting("HazardMoveStartCommands", defaults.hazard_move_start_commands);
+	settings.hazard_move_end_commands = LoadStringSetting("HazardMoveEndCommands", defaults.hazard_move_end_commands);
 
 	// navigation line settings
 	NavigationLine::LineStyle defaultLineStyle;
@@ -190,6 +219,23 @@ void SaveSettings(bool showMessage/* = true*/)
 	SaveBoolSetting("HazardShowOverlay", g_settings.hazard_show_overlay);
 	SaveBoolSetting("HazardShowMap", g_settings.hazard_show_map);
 	SaveNumberSetting("HazardMapLayer", g_settings.hazard_map_layer);
+
+	// hazard autonomy
+	SaveNumberSetting("HazardReactionMinMs", g_settings.hazard_reaction_min_ms);
+	SaveNumberSetting("HazardReactionMaxMs", g_settings.hazard_reaction_max_ms);
+	SaveNumberSetting("HazardRetargetMinMs", g_settings.hazard_retarget_min_ms);
+	SaveBoolSetting("HazardEvadeSoft", g_settings.hazard_evade_soft);
+	SaveNumberSetting("HazardCandidateCount", g_settings.hazard_candidate_count);
+	SaveNumberSetting("HazardCandidateRandomWeight", g_settings.hazard_candidate_random_weight);
+	SaveNumberSetting("HazardOtherHazardWeight", g_settings.hazard_other_hazard_weight);
+	SaveNumberSetting("HazardStopSuppressMs", g_settings.hazard_stop_suppress_ms);
+	SaveNumberSetting("HazardManualInputSuppressMs", g_settings.hazard_manual_input_suppress_ms);
+	SaveBoolSetting("HazardPauseMacro", g_settings.hazard_pause_macro);
+	SaveBoolSetting("HazardPauseCWTN", g_settings.hazard_pause_cwtn);
+	SaveStringSetting("HazardCWTNPauseCommand", g_settings.hazard_cwtn_pause_command);
+	SaveStringSetting("HazardCWTNResumeCommand", g_settings.hazard_cwtn_resume_command);
+	SaveStringSetting("HazardMoveStartCommands", g_settings.hazard_move_start_commands);
+	SaveStringSetting("HazardMoveEndCommands", g_settings.hazard_move_end_commands);
 }
 
 bool ParseIniCommand(const char* command)
