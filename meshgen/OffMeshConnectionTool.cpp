@@ -159,10 +159,14 @@ void OffMeshConnectionTool::handleMenu()
 		}
 		ImGui::Separator();
 
+		// ledge drops are always one-way (the mesh build enforces it too)
+		const bool isDrop = IsDropPolyArea(m_state->m_editConnection.areaType);
+		ImGui::BeginDisabled(isDrop);
 		if (ImGui::Checkbox("Bi-directional", &m_state->m_editConnection.bidirectional))
 		{
 			m_state->m_modified = true;
 		}
+		ImGui::EndDisabled();
 
 		uint8_t previousArea = m_state->m_editConnection.areaType;
 		if (AreaTypeCombo(navMesh.get(), &m_state->m_editConnection.areaType))
@@ -233,7 +237,21 @@ void OffMeshConnectionTool::handleClick(const glm::vec3& s, const glm::vec3& p, 
 	if (!m_meshTool) return; // ??
 
 	if (!m_editing)
+	{
+		// starting a new connection: keep the properties chosen in the "New Connection" panel
+		// (area, direction, name), otherwise picking "Drop" before clicking would be lost
+		OffMeshConnection newProperties = m_state->m_editConnection;
+		bool keepProperties = m_state->m_currentConnectionId == 0;
+
 		reset();
+
+		if (keepProperties)
+		{
+			m_state->m_editConnection.areaType = newProperties.areaType;
+			m_state->m_editConnection.bidirectional = newProperties.bidirectional;
+			m_state->m_editConnection.name = newProperties.name;
+		}
+	}
 	m_editing = true;
 
 	auto navMesh = m_meshTool->GetNavMesh();

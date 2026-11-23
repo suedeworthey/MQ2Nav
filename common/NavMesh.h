@@ -196,6 +196,9 @@ public:
 
 	std::shared_ptr<OffMeshConnectionBuffer> CreateOffMeshConnectionBuffer() const;
 
+	// true if any connection is a ledge drop (Drop / Drop (levitate))
+	bool HasDropLinks() const;
+
 	//------------------------------------------------------------------------
 	// events
 

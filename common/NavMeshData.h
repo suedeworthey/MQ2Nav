@@ -21,6 +21,8 @@ enum struct PolyFlags : uint16_t
 	Jump          = 0x04, // ability to jump. (unused)
 	Disabled      = 0x08, // disabled polygon
 	Door          = 0x10, // ability to open doors
+	// Drop links also carry Disabled, so builds of MQ2Nav that don't know about them (and exclude
+	// Disabled) never take them. Current builds gate them in NavPathFilter instead.
 	Drop          = 0x20, // drop off a ledge (taken if the fall is survivable or you levitate)
 	LevDrop       = 0x40, // drop off a ledge that is only taken while levitating
 
@@ -67,6 +69,13 @@ bool IsUserDefinedPolyArea(uint8_t areaId);
 inline bool IsDropPolyArea(uint8_t areaId)
 {
 	return areaId == static_cast<uint8_t>(PolyArea::Drop) || areaId == static_cast<uint8_t>(PolyArea::LevDrop);
+}
+
+// Height of a ledge drop link: ledge (vertex 0, the start) minus landing (vertex 1, the end).
+// Off-mesh connection polygons store their two endpoints in that order.
+inline float GetOffMeshLinkDrop(const float* tileVerts, const unsigned short* polyVerts)
+{
+	return tileVerts[polyVerts[0] * 3 + 1] - tileVerts[polyVerts[1] * 3 + 1];
 }
 
 

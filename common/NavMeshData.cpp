@@ -90,7 +90,7 @@ const std::vector<PolyAreaType> DefaultPolyAreas =
 		7,                       // id
 		"Drop",                  // name
 		RGBA(255, 160, 0, 255),  // color
-		+(PolyFlags::Drop),
+		+(PolyFlags::Drop | PolyFlags::Disabled), // Disabled: older MQ2Nav builds skip it
 		1.0f,                    // cost
 		true,                    // valid
 		true,                    // selectable
@@ -101,7 +101,7 @@ const std::vector<PolyAreaType> DefaultPolyAreas =
 		8,                       // id
 		"Drop (levitate)",       // name
 		RGBA(255, 96, 192, 255), // color
-		+(PolyFlags::LevDrop),
+		+(PolyFlags::LevDrop | PolyFlags::Disabled), // Disabled: older MQ2Nav builds skip it
 		1.0f,                    // cost
 		true,                    // valid
 		true,                    // selectable

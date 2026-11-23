@@ -86,9 +86,11 @@ private:
 	float m_maxSafeDrop = 20.f;
 
 	bool IsPolyWithinRadius(const dtMeshTile* tile, const dtPoly* poly) const;
-	bool IsDropAllowed(const dtMeshTile* tile, const dtPoly* poly) const;
 
 public:
+	// may this ledge-drop link be taken under the current drop rules?
+	bool IsDropAllowed(const dtMeshTile* tile, const dtPoly* poly) const;
+
 	NavPathFilter() = default;
 	~NavPathFilter() override = default;
 
@@ -214,6 +216,9 @@ private:
 		bool incremental);
 	void UpdatePathProperties();
 
+	// does the current path still contain a ledge drop the current rules forbid?
+	bool PathHasForbiddenDrop() const;
+
 	// Insert a waypoint after `segment` that bends the path around hazard `hazardIndex` without
 	// crossing any hard radius. Returns false if no walkable detour point was found.
 	bool TryHazardDetour(StraightPath& path, int segment, const HazardSnapshot& hazards,
@@ -230,7 +235,7 @@ private:
 	bool m_hazardBlocked = false;
 	std::string m_hazardBlockReason;
 	uint64_t m_hazardVersion = 0;
-	bool m_computedLevitating = false;   // levitation state the current path was computed with
+	uint64_t m_dropRulesKey = 0;         // drop link rules the current path was computed with
 
 	// the plugin owns the mesh
 	std::shared_ptr<dtNavMesh> m_navMesh;

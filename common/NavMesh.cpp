@@ -997,6 +997,12 @@ std::vector<dtTileRef> NavMesh::GetTilesIntersectingConnection(uint32_t connecti
 	return refs;
 }
 
+bool NavMesh::HasDropLinks() const
+{
+	return std::any_of(m_connections.begin(), m_connections.end(),
+		[](const std::unique_ptr<OffMeshConnection>& conn) { return conn && IsDropPolyArea(conn->areaType); });
+}
+
 std::shared_ptr<OffMeshConnectionBuffer> NavMesh::CreateOffMeshConnectionBuffer() const
 {
 	// crude and simple. Could be optimized in the future to not regenerate
@@ -1266,7 +1272,9 @@ OffMeshConnectionBuffer::OffMeshConnectionBuffer(
 		{
 			offMeshConVerts.emplace_back(conn->start, conn->end);
 			offMeshConRads.emplace_back(navMesh->GetNavMeshConfig().agentRadius);
-			offMeshConDirs.emplace_back(conn->bidirectional ? (uint8_t)DT_OFFMESH_CON_BIDIR : 0);
+			// ledge drops only work downward, whatever the connection says
+			offMeshConDirs.emplace_back(conn->bidirectional && !IsDropPolyArea(conn->areaType)
+				? (uint8_t)DT_OFFMESH_CON_BIDIR : 0);
 			offMeshConAreas.emplace_back(conn->areaType);
 			offMeshConFlags.emplace_back(navMesh->GetPolyArea(conn->areaType).flags);
 			offMeshConId.emplace_back(conn->id);

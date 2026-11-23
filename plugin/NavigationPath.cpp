@@ -38,8 +38,27 @@ NavigationLine::LineStyle gNavigationLineStyle;
 
 static bool IsPlayerLevitating()
 {
-	PlayerClient* me = pControlledPlayer ? pControlledPlayer : pLocalPlayer;
+	// the same spawn the path starts from (UpdatePath, StuckCheck)
+	PlayerClient* me = GetCharInfo() ? GetCharInfo()->pSpawn : nullptr;
 	return me && !!me->mPlayerPhysicsClient.Levitate;
+}
+
+// Everything that decides which drop links are usable. A path is recomputed when this changes.
+// Levitation only matters when drop links are on and the mesh has any.
+static uint64_t GetDropRulesKey()
+{
+	const auto& settings = nav::GetSettings();
+	if (!settings.use_drop_links)
+		return 0;
+
+	NavMesh* mesh = g_mq2Nav ? g_mq2Nav->Get<NavMesh>() : nullptr;
+	bool levitating = mesh && mesh->HasDropLinks() && IsPlayerLevitating();
+
+	uint32_t height = static_cast<uint32_t>(std::max(0.f, settings.max_safe_drop_height) * 10.f);
+	return 1ull
+		| (levitating ? 2ull : 0ull)
+		| (settings.drop_links_require_levitate ? 4ull : 0ull)
+		| (static_cast<uint64_t>(height) << 8);
 }
 
 //----------------------------------------------------------------------------
@@ -231,11 +250,13 @@ void NavigationPath::UpdatePath(bool force, bool incremental)
 	// current position in mesh coordinates
 	glm::vec3 thisPos{ me->X, me->FloorHeight, me->Y };
 
-	// a change in hazards (added, moved, removed) or in levitation (which drop links are usable) also
-	// requires a new path
+	// a change in hazards (added, moved, removed) or in which drop links are usable (levitation, drop
+	// settings) also requires a new path
+	const uint64_t dropRulesKey = GetDropRulesKey();
+	const bool dropRulesChanged = dropRulesKey != m_dropRulesKey;
 	if (thisPos == m_lastPos && m_destination == m_destinationInfo->eqDestinationPos && !force
 		&& (!m_destinationInfo->avoidHazards || m_hazardVersion == GetHazardVersion())
-		&& m_computedLevitating == IsPlayerLevitating())
+		&& !dropRulesChanged)
 	{
 		return;
 	}
@@ -249,6 +270,15 @@ void NavigationPath::UpdatePath(bool force, bool incremental)
 
 	std::unique_ptr<StraightPath> newPath = RecomputePath(thisPos, dest, force, incremental);
 	bool changed = false;
+
+	// The rules for drop links changed (e.g. levitation faded) and no new path was found: the old path
+	// must not be kept if it still contains a drop that is no longer allowed.
+	if (!newPath && incremental && dropRulesChanged && PathHasForbiddenDrop())
+	{
+		m_hazardBlocked = true;
+		m_hazardBlockReason = "The planned ledge drop is no longer safe (levitation ended?) and there is no other way";
+		m_failed = true;
+	}
 
 	if (newPath)
 	{
@@ -349,8 +379,8 @@ std::unique_ptr<StraightPath> NavigationPath::RecomputePath(
 	m_hazardBlockReason.clear();
 
 	// ledge drop links: usable while levitating, or when the fall is within the safe height
-	m_computedLevitating = IsPlayerLevitating();
-	m_filter.SetDropRules(settings.use_drop_links, m_computedLevitating,
+	m_dropRulesKey = GetDropRulesKey();
+	m_filter.SetDropRules(settings.use_drop_links, IsPlayerLevitating(),
 		settings.max_safe_drop_height, settings.drop_links_require_levitate);
 
 	// TODO: Cache the last known valid starting position to detect when moving off the mesh
@@ -777,11 +807,33 @@ void NavigationPath::UpdatePathProperties()
 		if (dtStatusSucceed(m_navMesh->getTileAndPolyByRef(std::get<dtPolyRef>(node), &tile, &poly))
 			&& poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION && IsDropPolyArea(poly->getArea()))
 		{
-			const float* start = &tile->verts[poly->verts[0] * 3];
-			const float* end = &tile->verts[poly->verts[1] * 3];
-			SPDLOG_INFO("Dropping {:.0f} ft{}", start[1] - end[1], IsPlayerLevitating() ? " (levitating)" : "");
+			float drop = GetOffMeshLinkDrop(tile->verts, poly->verts);
+			if (drop > 0.f)
+				SPDLOG_INFO("Dropping {:.0f} ft{}", drop, IsPlayerLevitating() ? " (levitating)" : "");
 		}
 	}
+}
+
+bool NavigationPath::PathHasForbiddenDrop() const
+{
+	if (!m_currentPath || !m_navMesh)
+		return false;
+
+	for (int i = m_currentPath->cursor > 0 ? m_currentPath->cursor - 1 : 0; i < m_currentPath->length; ++i)
+	{
+		if (!(m_currentPath->flags[i] & DT_STRAIGHTPATH_OFFMESH_CONNECTION))
+			continue;
+
+		const dtMeshTile* tile = nullptr;
+		const dtPoly* poly = nullptr;
+		if (dtStatusSucceed(m_navMesh->getTileAndPolyByRef(m_currentPath->polys[i], &tile, &poly))
+			&& poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION && IsDropPolyArea(poly->getArea())
+			&& !m_filter.IsDropAllowed(tile, poly))
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 float NavigationPath::GetPathTraversalDistance() const
@@ -1115,10 +1167,9 @@ bool NavPathFilter::IsDropAllowed(const dtMeshTile* tile, const dtPoly* poly) co
 	if (m_dropsRequireLevitate || poly->getArea() == static_cast<uint8_t>(PolyArea::LevDrop))
 		return false;
 
-	// off-mesh connection polygons store the start (ledge) in vertex 0 and the end (landing) in vertex 1
-	const float* start = &tile->verts[poly->verts[0] * 3];
-	const float* end = &tile->verts[poly->verts[1] * 3];
-	return (start[1] - end[1]) <= m_maxSafeDrop;
+	// a link placed landing-first would "drop" upward: never take that without levitation
+	float drop = GetOffMeshLinkDrop(tile->verts, poly->verts);
+	return drop > 0.f && drop <= m_maxSafeDrop;
 }
 
 bool NavPathFilter::passFilter(const dtPolyRef ref, const dtMeshTile* tile, const dtPoly* poly) const
@@ -1126,11 +1177,9 @@ bool NavPathFilter::passFilter(const dtPolyRef ref, const dtMeshTile* tile, cons
 	if (m_searchRadius > 0 && !IsPolyWithinRadius(tile, poly))
 		return false;
 
-	if (poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION && IsDropPolyArea(poly->getArea())
-		&& !IsDropAllowed(tile, poly))
-	{
-		return false;
-	}
+	// Drop links carry the Disabled flag so older builds skip them; decide here instead of the flag check.
+	if (poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION && IsDropPolyArea(poly->getArea()))
+		return IsDropAllowed(tile, poly);
 
 	if (m_hazards && ref != m_exemptStart && ref != m_exemptEnd)
 	{
